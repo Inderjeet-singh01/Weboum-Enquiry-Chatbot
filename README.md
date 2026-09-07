@@ -24,7 +24,7 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 
 1. New session → `Hi! How can I help you today?` with exactly `Business Enquiry` and `Website / General Question`
 2. `Business Enquiry` → 9 fixed steps in `app/services/enquiry.py` (`ENQUIRY_FIELD_ORDER`). LLM never chooses the next step
-3. After step 9 → confirmation, `completed: true`, enquiry object stored in `_completed_enquiries`, suggestion exactly `Anything Else?`
+3. After step 9 → `map_enquiry_data()` → async Brevo email via `app/services/email.py` → confirmation, `completed: true`, suggestion exactly `Anything Else?`. Email is sent once, only after all 9 steps. If Brevo fails, do **not** use the success copy; use `EMAIL_FAILURE_MESSAGE`.
 4. After submit, `Anything Else?` switches **the same session** to `mode=general` (`Sure! What else would you like to know?`)
 5. `Website / General Question` → `mode=general`, user asks a question, Groq LLM + `app/prompts/general.py`, then exactly `Anything Else?` and `Enquire Now`
 6. `Anything Else?` stays in general
@@ -49,9 +49,10 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 | `app/main.py` | FastAPI app, CORS, router include. No business logic |
 | `app/api/chat.py` | `POST /api/chat` only |
 | `app/schemas/chat.py` | `ChatRequest`, `ChatResponse` |
-| `app/core/config.py` | `GROQ_API_KEY`, `LLM_MODEL`, `APP_ENV`, `CORS_ORIGINS` |
-| `app/services/chatbot.py` | Runtime sessions, locks, routing, Groq call (`generate_general_answer`) |
-| `app/services/enquiry.py` | Deterministic enquiry machine, validation, `Session` dataclass |
+| `app/core/config.py` | `GROQ_API_KEY`, `LLM_MODEL`, `APP_ENV`, `CORS_ORIGINS`, `BREVO_API_KEY`, `ENQUIRY_EMAIL_TO`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME` |
+| `app/services/chatbot.py` | Runtime sessions, locks, routing, Groq call, one email send on enquiry completion |
+| `app/services/enquiry.py` | Deterministic enquiry machine, validation, `Session`, `map_enquiry_data()` |
+| `app/services/email.py` | HTML email + async Brevo HTTP API. No enquiry-step logic |
 | `app/prompts/general.py` | `GENERAL_SYSTEM_PROMPT` + `COMPANY_KNOWLEDGE` (edit company facts here only) |
 | `tests/test_chat.py` | Acceptance tests; LLM is mocked |
 
@@ -62,9 +63,16 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 - Per-session `asyncio.Lock` so concurrent users do not mix state
 - `reset_runtime_state()` for tests only
 
+**Git (do this every time code is fetched or pushed)**
+
+- Remote: `https://github.com/Inderjeet-singh01/Weboum-Enquiry-Chatbot.git`
+- Branch: **`main` only** — never push or pull feature branches unless the user explicitly changes this
+- Do **not** push until the user says to push
+- Do not commit `.env` or secrets
+
 **Out of scope on purpose**
 
-No database, Redis, Docker, CRM, email sending, RAG/vector store, extra chat endpoints, or multi-worker design.
+No database, Redis, Docker, CRM, RAG/vector store, extra chat endpoints, or multi-worker design. Enquiry email is Brevo HTTP only (not SMTP).
 
 **Replace later**
 
@@ -83,7 +91,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GROQ_API_KEY` in `.env`. Then start **one** Uvicorn worker:
+Set `GROQ_API_KEY` and the Brevo variables in `.env`. Then start **one** Uvicorn worker:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
@@ -117,7 +125,7 @@ app/api/chat.py
    ▼
 app/services/chatbot.py          # session + mode router
    ├── initial greeting
-   ├── enquiry  → app/services/enquiry.py
+   ├── enquiry  → app/services/enquiry.py → on complete, app/services/email.py (Brevo)
    └── general  → Groq LLM + app/prompts/general.py
    ▼
 ChatResponse { message, type, suggestions, mode, step, completed }
@@ -140,6 +148,7 @@ app/
 ├── core/config.py
 ├── services/chatbot.py
 ├── services/enquiry.py
+├── services/email.py
 └── prompts/general.py
 tests/
 ├── conftest.py
@@ -201,9 +210,11 @@ Questions are asked one by one. Option steps require an exact match against the 
 
 - `completed` is true
 - confirmation message is returned
+- suggestion is exactly `["Anything Else?"]`
 - an enquiry object is appended to in-memory `_completed_enquiries`
-
-No CRM, email, or disk write.
+- one Brevo email is sent with `mapped_data` (HTML table)
+- `Anything Else?` after submit moves the same session into general chat
+- If Brevo fails: enquiry stays completed in memory, user is **not** told the email was sent
 
 ---
 
@@ -256,6 +267,10 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `LLM_MODEL` | Default `llama-3.3-70b-versatile` |
 | `APP_ENV` | e.g. `development` |
 | `CORS_ORIGINS` | Comma-separated origins, e.g. `http://localhost:3000` |
+| `BREVO_API_KEY` | Brevo API key (server-side only; never log or return it) |
+| `ENQUIRY_EMAIL_TO` | Company inbox that receives completed enquiries |
+| `BREVO_SENDER_EMAIL` | Verified Brevo sender address |
+| `BREVO_SENDER_NAME` | Sender display name, default `Website Enquiry Bot` |
 
 ---
 
@@ -299,5 +314,5 @@ When you need persistence or horizontal scale, introduce Redis or a database beh
 - Replace `COMPANY_KNOWLEDGE` with CMS, crawl, or documents
 - Add retrieval (RAG) in front of `generate_general_answer` without changing `/api/chat`
 - Persist sessions and completed enquiries
-- CRM / email on enquiry completion
+- CRM integration beyond the current Brevo notification
 - Keep enquiry order in Python; do not let the LLM drive it

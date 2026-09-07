@@ -9,18 +9,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import EmailStr, TypeAdapter, ValidationError
 
-from app.schemas.chat import (
-    ChatResponse,
-    ConversationMode,
-    EnquiryData,
-    ResponseType,
-    validate_company_name,
-    validate_full_name,
-    validate_tech_stack,
-    validate_work_email,
-)
+from app.schemas.chat import ChatResponse, ConversationMode, ResponseType
 
 ENQUIRY_FIELD_ORDER = [
     "biggest_operational_challenge",
@@ -123,9 +114,25 @@ COMPLETION_MESSAGE = (
 )
 POST_SUBMIT_SUGGESTIONS = ["Anything Else?"]
 
+_EMAIL_ADAPTER = TypeAdapter(EmailStr)
+_PHONE_PATTERN = re.compile(r"^\+?[0-9() .\-]+$")
+
 
 def empty_enquiry_data() -> dict[str, str | None]:
     return {key: None for key in ENQUIRY_FIELD_ORDER}
+
+
+MAPPED_FIELD_LABELS = [
+    ("biggest_operational_challenge", "Biggest Operational Challenge"),
+    ("ai_capability", "AI Capability / Area of Interest"),
+    ("primary_industry", "Primary Industry"),
+    ("business_size", "Business Size"),
+    ("full_name", "Full Name"),
+    ("company_name", "Company Name"),
+    ("work_email", "Work Email"),
+    ("phone_number", "Phone Number"),
+    ("current_technology_stack", "Current Technology Stack"),
+]
 
 
 @dataclass
@@ -134,11 +141,13 @@ class Session:
     current_step: str | None = None
     data: dict[str, str | None] = field(default_factory=empty_enquiry_data)
     completed: bool = False
+    email_sent: bool = False
 
 
 def start_enquiry(session: Session) -> ChatResponse:
     session.mode = ConversationMode.enquiry.value
     session.completed = False
+    session.email_sent = False
     session.data = empty_enquiry_data()
     session.current_step = FIRST_STEP
     return step_response(FIRST_STEP)
@@ -183,11 +192,22 @@ def process_enquiry_answer(session: Session, message: str) -> ChatResponse:
 
 
 def build_enquiry_object(session_id: str, session: Session) -> dict[str, str | None]:
-    try:
-        validated = EnquiryData(**session.data).model_dump()
-    except (ValueError, ValidationError):
-        validated = dict(session.data)
-    return {"session_id": session_id, **validated}
+    return {"session_id": session_id, **session.data}
+
+
+def map_enquiry_data(enquiry: dict[str, str | None]) -> dict[str, list[dict[str, str]]]:
+    session_id = str(enquiry.get("session_id") or "")
+    mapped_data = []
+    for key, label in MAPPED_FIELD_LABELS:
+        value = enquiry.get(key)
+        mapped_data.append(
+            {
+                "session_id": session_id,
+                "field": label,
+                "value": "" if value is None else str(value),
+            }
+        )
+    return {"mapped_data": mapped_data}
 
 
 def step_response(step_key: str, prefix: str | None = None) -> ChatResponse:
@@ -221,14 +241,10 @@ def _next_step(current: str) -> str | None:
 
 
 def _validate_answer(step_key: str, message: str) -> str | None:
-    message = message.strip() if message else ""
-    if not message:
+    if not message or not message.strip():
         return "Please provide an answer to continue."
 
-    definition = STEP_DEFINITIONS.get(step_key)
-    if not definition:
-        return "Invalid enquiry step."
-
+    definition = STEP_DEFINITIONS[step_key]
     response_type: ResponseType = definition["type"]
     options: list[str] = definition["options"]
 
@@ -237,16 +253,30 @@ def _validate_answer(step_key: str, message: str) -> str | None:
             return "Please choose one of the listed options."
         return None
 
-    try:
-        if step_key == "work_email":
-            validate_work_email(message)
-        elif step_key == "full_name":
-            validate_full_name(message)
-        elif step_key == "company_name":
-            validate_company_name(message)
-        elif step_key == "current_technology_stack":
-            validate_tech_stack(message)
-    except (ValueError, ValidationError) as exc:
-        return str(exc)
+    if response_type == ResponseType.email:
+        if not _is_valid_email(message):
+            return "Please enter a valid work email address."
+        return None
+
+    if response_type == ResponseType.phone:
+        if not _is_valid_phone(message):
+            return "Please enter a valid phone number."
+        return None
 
     return None
+
+
+def _is_valid_email(value: str) -> bool:
+    try:
+        _EMAIL_ADAPTER.validate_python(value)
+        return True
+    except ValidationError:
+        return False
+
+
+def _is_valid_phone(value: str) -> bool:
+    value = value.strip()
+    if not _PHONE_PATTERN.fullmatch(value):
+        return False
+    digits = re.sub(r"\D", "", value)
+    return 7 <= len(digits) <= 15

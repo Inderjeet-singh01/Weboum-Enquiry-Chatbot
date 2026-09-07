@@ -1,5 +1,6 @@
 from app.services import chatbot
-from app.services.enquiry import ENQUIRY_FIELD_ORDER, STEP_DEFINITIONS
+from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError
+from app.services.enquiry import ENQUIRY_FIELD_ORDER, STEP_DEFINITIONS, map_enquiry_data
 
 CHALLENGE = "Repetitive manual data entry & paper/PDF document processing"
 AI_CAPABILITY = "AI Chatbots & Voice AI Assistants"
@@ -170,6 +171,22 @@ def test_step_8_asks_phone_number(client):
     assert "Phone Number" in data["message"]
 
 
+def test_invalid_phone_is_rejected(client):
+    start_session(client, "bad-phone")
+    send(client, "bad-phone", "Business Enquiry")
+    send(client, "bad-phone", CHALLENGE)
+    send(client, "bad-phone", AI_CAPABILITY)
+    send(client, "bad-phone", INDUSTRY)
+    send(client, "bad-phone", SIZE)
+    send(client, "bad-phone", "Ada Lovelace")
+    send(client, "bad-phone", "Analytical Engines")
+    send(client, "bad-phone", "ada@example.com")
+    data = send(client, "bad-phone", "abc").json()
+    assert data["step"] == "phone_number"
+    assert data["completed"] is False
+    assert "valid phone" in data["message"].lower()
+
+
 def test_step_9_asks_current_technology_stack(client):
     start_session(client, "s9")
     send(client, "s9", "Business Enquiry")
@@ -202,6 +219,37 @@ def test_final_enquiry_completes_correctly(client):
     assert stored[0]["work_email"] == "ada@example.com"
     assert stored[0]["biggest_operational_challenge"] == CHALLENGE
     assert stored[0]["current_technology_stack"] == "WhatsApp, Salesforce, Excel"
+
+
+def test_enquiry_email_html_escapes_user_input():
+    from app.services.email import build_enquiry_email_html
+
+    html_body = build_enquiry_email_html(
+        [
+            {
+                "session_id": "s1",
+                "field": "Full Name",
+                "value": "<script>alert(1)</script>",
+            }
+        ]
+    )
+    assert "<script>" not in html_body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_body
+
+
+def test_anything_else_after_enquiry_submit_switches_to_general(client, mock_llm):
+    run_enquiry_until(client, "after-submit")
+    follow = send(client, "after-submit", "Anything Else?").json()
+    assert follow["mode"] == "general"
+    assert follow["completed"] is False
+    assert follow["message"] == "Sure! What else would you like to know?"
+    assert follow["suggestions"] == []
+    assert chatbot._sessions["after-submit"].mode == "general"
+
+    answer = send(client, "after-submit", "What services do you provide?").json()
+    assert answer["mode"] == "general"
+    assert answer["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert len(chatbot.get_completed_enquiries()) == 1
 
 
 def test_two_users_maintain_separate_session_data(client):
@@ -311,14 +359,9 @@ def test_empty_message_rejected_after_session_exists(client):
     assert response.json()["detail"] == "message must not be empty"
 
 
-def test_missing_session_id_is_auto_generated(client):
-    response = client.post("/api/chat", json={"message": ""})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["session_id"] is not None
-    assert len(data["session_id"]) > 0
-    assert data["mode"] == "initial"
-    assert data["message"] == "Hi! How can I help you today?"
+def test_missing_session_id_is_rejected(client):
+    response = client.post("/api/chat", json={"message": "hello"})
+    assert response.status_code == 422
 
 
 def test_new_session_ignores_first_payload_and_returns_greeting(client):
@@ -327,79 +370,152 @@ def test_new_session_ignores_first_payload_and_returns_greeting(client):
     assert data["suggestions"] == ["Business Enquiry", "Website / General Question"]
 
 
-def test_get_all_sessions_empty(client):
-    response = client.get("/api/all-sessions")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["total_sessions"] == 0
-    assert data["sessions"] == {}
-    assert data["completed_enquiries"] == []
+def test_completed_enquiry_sends_one_mapped_brevo_email(client, mock_email):
+    data = run_enquiry_until(client, "44f95284c2174f4fa787699b45663925")
+    assert data["completed"] is True
+    assert "submitted successfully" in data["message"]
+    assert len(mock_email) == 1
+    mapped = mock_email[0]
+    assert list(mapped.keys()) == ["mapped_data"]
+    items = mapped["mapped_data"]
+    assert len(items) == 9
+    assert {item["session_id"] for item in items} == {"44f95284c2174f4fa787699b45663925"}
+    assert [item["field"] for item in items] == [
+        "Biggest Operational Challenge",
+        "AI Capability / Area of Interest",
+        "Primary Industry",
+        "Business Size",
+        "Full Name",
+        "Company Name",
+        "Work Email",
+        "Phone Number",
+        "Current Technology Stack",
+    ]
+    assert items[4]["value"] == "Ada Lovelace"
+    assert items[6]["value"] == "ada@example.com"
 
 
-def test_get_all_sessions_returns_full_information(client):
-    start_session(client, "sess-1")
-    send(client, "sess-1", "Business Enquiry")
-    send(client, "sess-1", CHALLENGE)
-
-    response = client.get("/api/all-sessions")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["total_sessions"] == 1
-    assert "sess-1" in data["sessions"]
-
-    s1 = data["sessions"]["sess-1"]
-    assert s1["session_id"] == "sess-1"
-    assert s1["mode"] == "enquiry"
-    assert s1["current_step"] == "ai_capability"
-    assert s1["data"]["biggest_operational_challenge"] == CHALLENGE
-    assert s1["completed"] is False
+def test_two_completed_enquiries_send_separate_emails(client, mock_email):
+    run_enquiry_until(client, "user-a-complete")
+    run_enquiry_until(client, "user-b-complete")
+    assert len(mock_email) == 2
+    first_ids = {item["session_id"] for item in mock_email[0]["mapped_data"]}
+    second_ids = {item["session_id"] for item in mock_email[1]["mapped_data"]}
+    assert first_ids == {"user-a-complete"}
+    assert second_ids == {"user-b-complete"}
 
 
-def test_one_digit_name_is_rejected(client):
-    start_session(client, "v-name")
-    send(client, "v-name", "Business Enquiry")
-    send(client, "v-name", CHALLENGE)
-    send(client, "v-name", AI_CAPABILITY)
-    send(client, "v-name", INDUSTRY)
-    send(client, "v-name", SIZE)
-
-    # 1 digit name
-    res = send(client, "v-name", "1").json()
-    assert res["step"] == "full_name"
-    assert res["completed"] is False
-    assert "valid full name" in res["message"].lower()
+def test_general_questions_do_not_send_email(client, mock_llm, mock_email):
+    start_session(client, "gen-email")
+    send(client, "gen-email", "Website / General Question")
+    send(client, "gen-email", "What services does your company provide?")
+    send(client, "gen-email", "Anything Else?")
+    assert mock_email == []
 
 
-def test_one_digit_company_is_rejected(client):
-    start_session(client, "v-co")
-    send(client, "v-co", "Business Enquiry")
-    send(client, "v-co", CHALLENGE)
-    send(client, "v-co", AI_CAPABILITY)
-    send(client, "v-co", INDUSTRY)
-    send(client, "v-co", SIZE)
-    send(client, "v-co", "Ada Lovelace")
+def test_enquire_now_sends_email_only_after_full_enquiry(client, mock_llm, mock_email):
+    session_id = "enquire-now-email"
+    start_session(client, session_id)
+    send(client, session_id, "Website / General Question")
+    send(client, session_id, "What services do you provide?")
+    send(client, session_id, "Enquire Now")
+    assert mock_email == []
+    assert chatbot._sessions[session_id].mode == "enquiry"
 
-    # 1 digit company
-    res = send(client, "v-co", "1").json()
-    assert res["step"] == "company_name"
-    assert res["completed"] is False
-    assert "valid company name" in res["message"].lower()
+    answers = {
+        "biggest_operational_challenge": CHALLENGE,
+        "ai_capability": AI_CAPABILITY,
+        "primary_industry": INDUSTRY,
+        "business_size": SIZE,
+        "full_name": "Ada Lovelace",
+        "company_name": "Analytical Engines",
+        "work_email": "ada@example.com",
+        "phone_number": "+44 7700 900123",
+        "current_technology_stack": "WhatsApp, Salesforce, Excel",
+    }
+    last = None
+    for step in ENQUIRY_FIELD_ORDER:
+        last = send(client, session_id, answers[step])
+        assert last.status_code == 200
+    assert last.json()["completed"] is True
+    assert len(mock_email) == 1
+    assert {item["session_id"] for item in mock_email[0]["mapped_data"]} == {session_id}
 
 
-def test_one_digit_tech_stack_is_rejected(client):
-    start_session(client, "v-tech")
-    send(client, "v-tech", "Business Enquiry")
-    send(client, "v-tech", CHALLENGE)
-    send(client, "v-tech", AI_CAPABILITY)
-    send(client, "v-tech", INDUSTRY)
-    send(client, "v-tech", SIZE)
-    send(client, "v-tech", "Ada Lovelace")
-    send(client, "v-tech", "Analytical Engines")
-    send(client, "v-tech", "ada@example.com")
-    send(client, "v-tech", "+44 7700 900123")
+def test_brevo_failure_does_not_claim_success(client, monkeypatch):
+    async def fail_send(_mapped: dict) -> None:
+        raise EmailSendError("Enquiry email could not be sent")
 
-    # 1 digit tech stack
-    res = send(client, "v-tech", "1").json()
-    assert res["step"] == "current_technology_stack"
-    assert res["completed"] is False
-    assert "tools or technology stack" in res["message"].lower()
+    monkeypatch.setattr(chatbot, "send_enquiry_email", fail_send)
+    data = run_enquiry_until(client, "email-fail")
+    assert data["completed"] is True
+    assert data["message"] == EMAIL_FAILURE_MESSAGE
+    assert "submitted successfully" not in data["message"].lower()
+    assert "brevo" not in data["message"].lower()
+    assert "api key" not in data["message"].lower()
+    assert data["suggestions"] == ["Anything Else?"]
+
+
+def test_map_enquiry_data_shape():
+    enquiry = {
+        "session_id": "44f95284c2174f4fa787699b45663925",
+        "biggest_operational_challenge": "Repetitive manual data entry & paper/PDF document processing",
+        "ai_capability": "AI Agents & Workflow Automation",
+        "primary_industry": "Hospitality & Restaurants",
+        "business_size": "11 - 50 employees",
+        "full_name": "inder",
+        "company_name": "weboum",
+        "work_email": "weboum@g.com",
+        "phone_number": "9876543210",
+        "current_technology_stack": "WhatsApp",
+    }
+    mapped = map_enquiry_data(enquiry)
+    assert mapped == {
+        "mapped_data": [
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Biggest Operational Challenge",
+                "value": "Repetitive manual data entry & paper/PDF document processing",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "AI Capability / Area of Interest",
+                "value": "AI Agents & Workflow Automation",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Primary Industry",
+                "value": "Hospitality & Restaurants",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Business Size",
+                "value": "11 - 50 employees",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Full Name",
+                "value": "inder",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Company Name",
+                "value": "weboum",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Work Email",
+                "value": "weboum@g.com",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Phone Number",
+                "value": "9876543210",
+            },
+            {
+                "session_id": "44f95284c2174f4fa787699b45663925",
+                "field": "Current Technology Stack",
+                "value": "WhatsApp",
+            },
+        ]
+    }

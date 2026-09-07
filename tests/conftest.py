@@ -18,6 +18,17 @@ def client():
         yield test_client
 
 
+@pytest.fixture(autouse=True)
+def mock_email(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_send(mapped: dict) -> None:
+        calls.append(mapped)
+
+    monkeypatch.setattr(chatbot, "send_enquiry_email", fake_send)
+    return calls
+
+
 @pytest.fixture
 def mock_llm(monkeypatch):
     async def fake_answer(question: str) -> str:

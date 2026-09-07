@@ -32,13 +32,13 @@ Rules:
 # Placeholder company knowledge for the MVP. Edit this block to match the real website.
 COMPANY_KNOWLEDGE = """
 COMPANY NAME
-Weboum Technologies
+ApexNova Technologies
 
 TAGLINE
 Practical AI, automation, and custom software for growing businesses.
 
 OVERVIEW
-Weboum Technologies helps organizations reduce manual work, improve customer
+ApexNova Technologies helps organizations reduce manual work, improve customer
 response times, and connect disconnected systems. We design and build AI-powered
 products, workflow automation, custom software, and data platforms.
 

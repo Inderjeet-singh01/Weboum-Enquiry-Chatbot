@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
-import uuid
 
 from fastapi import HTTPException
 from groq import AsyncGroq
@@ -13,7 +11,14 @@ from groq import AsyncGroq
 from app.core.config import settings
 from app.prompts.general import COMPANY_KNOWLEDGE, GENERAL_SYSTEM_PROMPT
 from app.schemas.chat import ChatResponse, ConversationMode, ResponseType
-from app.services.enquiry import Session, build_enquiry_object, process_enquiry_answer, start_enquiry
+from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError, send_enquiry_email
+from app.services.enquiry import (
+    Session,
+    build_enquiry_object,
+    map_enquiry_data,
+    process_enquiry_answer,
+    start_enquiry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,34 +56,10 @@ def get_completed_enquiries() -> list[dict[str, str | None]]:
     return list(_completed_enquiries)
 
 
-def get_all_sessions() -> dict[str, Any]:
-    sessions_snapshot = {}
-    for session_id, session in list(_sessions.items()):
-        sessions_snapshot[session_id] = {
-            "session_id": session_id,
-            "mode": session.mode,
-            "current_step": session.current_step,
-            "data": dict(session.data) if session.data else {},
-            "completed": session.completed,
-        }
-    return {
-        "total_sessions": len(sessions_snapshot),
-        "sessions": sessions_snapshot,
-        "completed_enquiries": list(_completed_enquiries),
-    }
-
-
-async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
-    if not session_id or not session_id.strip():
-        session_id = uuid.uuid4().hex
-    else:
-        session_id = session_id.strip()
-
+async def handle_chat(session_id: str, message: str) -> ChatResponse:
     lock = await _lock_for(session_id)
     async with lock:
-        response = await _handle_locked(session_id, message)
-        response.session_id = session_id
-        return response
+        return await _handle_locked(session_id, message)
 
 
 async def generate_general_answer(user_question: str) -> str:
@@ -125,7 +106,7 @@ async def _handle_locked(session_id: str, message: str) -> ChatResponse:
         return _handle_initial(session, message)
 
     if session.mode == ConversationMode.enquiry.value:
-        return _handle_enquiry(session_id, session, message)
+        return await _handle_enquiry(session_id, session, message)
 
     if session.mode == ConversationMode.general.value:
         return await _handle_general(session, message)
@@ -181,15 +162,38 @@ def _handle_initial(session: Session, message: str) -> ChatResponse:
     )
 
 
-def _handle_enquiry(session_id: str, session: Session, message: str) -> ChatResponse:
+async def _handle_enquiry(session_id: str, session: Session, message: str) -> ChatResponse:
     _require_message(message)
     if session.completed and message == ANYTHING_ELSE:
         return _switch_to_general(session)
-    already_complete = session.completed
+    if session.completed:
+        if not session.email_sent:
+            return _email_failure_response()
+        return process_enquiry_answer(session, message)
+
     response = process_enquiry_answer(session, message)
-    if response.completed and not already_complete:
-        _completed_enquiries.append(build_enquiry_object(session_id, session))
+    if response.completed:
+        enquiry = build_enquiry_object(session_id, session)
+        _completed_enquiries.append(enquiry)
+        try:
+            await send_enquiry_email(map_enquiry_data(enquiry))
+            session.email_sent = True
+        except EmailSendError:
+            logger.exception("Enquiry notification email failed")
+            session.email_sent = False
+            return _email_failure_response()
     return response
+
+
+def _email_failure_response() -> ChatResponse:
+    return ChatResponse(
+        message=EMAIL_FAILURE_MESSAGE,
+        type=ResponseType.text,
+        suggestions=["Anything Else?"],
+        mode=ConversationMode.enquiry,
+        step=None,
+        completed=True,
+    )
 
 
 def _switch_to_general(session: Session) -> ChatResponse:
