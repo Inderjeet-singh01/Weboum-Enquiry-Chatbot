@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Weboum Technologies Chatbot - Test Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <main class="chat-container">
+    <!-- Header -->
+    <header class="chat-header">
+      <div class="header-brand">
+        <div class="brand-avatar">
+          W
+          <span class="status-dot" title="Online"></span>
+        </div>
+        <div class="brand-info">
+          <h1>Weboum Assistant <span class="badge-tag">MVP</span></h1>
+          <p>Business Enquiry &amp; Website Intelligence</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div id="session-badge" class="session-badge" title="Click to copy Session ID">
+          <span>Session:</span>
+          <strong id="session-id-display">Connecting...</strong>
+        </div>
+        <button id="new-chat-btn" class="btn-icon" title="Start a fresh conversation">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+            <path d="M8 16H3v5"/>
+          </svg>
+          New Chat
+        </button>
+        <button id="inspect-btn" class="btn-icon btn-primary" title="View all stored sessions in JSON">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12h20"/>
+            <path d="M20 12v8H4v-8"/>
+            <path d="M4 4h16v4H4z"/>
+          </svg>
+          Sessions
+        </button>
+      </div>
+    </header>
+
+    <!-- Enquiry Step Progress Tracker -->
+    <div id="enquiry-tracker" class="enquiry-tracker">
+      <div class="tracker-label">
+        <span>Enquiry Progress:</span>
+        <span id="tracker-step-tag" class="tracker-step-tag">Step 1/9</span>
+      </div>
+      <div class="tracker-progress-bg">
+        <div id="tracker-progress-fill" class="tracker-progress-fill"></div>
+      </div>
+    </div>
+
+    <!-- Messages Container -->
+    <section id="chat-messages" class="chat-messages" aria-label="Conversation messages">
+      <!-- Messages appended dynamically -->
+    </section>
+
+    <!-- Typing Indicator -->
+    <div id="typing-indicator" class="typing-indicator" aria-live="polite">
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+    </div>
+
+    <!-- Input Footer -->
+    <footer class="chat-footer">
+      <div class="input-wrapper">
+        <input 
+          id="chat-input" 
+          type="text" 
+          class="chat-input" 
+          placeholder="Type your message or select an option..." 
+          autocomplete="off"
+        />
+        <button id="send-btn" class="send-btn" aria-label="Send message">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
+      <div class="footer-hint">
+        <span>Press <strong>Enter</strong> to send</span>
+        <span>MVP In-Memory Backend</span>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Sessions Inspector Modal -->
+  <div id="sessions-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="modal-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+          </svg>
+          Active Sessions Inspector (/api/all-sessions)
+        </h2>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button id="refresh-sessions-btn" class="btn-icon" style="padding: 4px 10px; font-size: 12px;">
+            Refresh
+          </button>
+          <button id="close-modal-btn" class="close-btn" aria-label="Close modal">&times;</button>
+        </div>
+      </div>
+      <div id="sessions-content" class="modal-body">
+        <!-- Sessions data loaded dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
