@@ -110,7 +110,9 @@ async def generate_general_answer(
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
     if history:
-        for turn in history[-6:]:
+        limit = settings.CHAT_HISTORY_CONTEXT_MESSAGES
+        history_slice = history[-limit:] if limit > 0 else []
+        for turn in history_slice:
             role = turn.get("role")
             content = turn.get("content")
             if role in ("user", "assistant") and content:
@@ -273,8 +275,9 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         answer = await generate_general_answer(message, context, session.history)
         session.history.append({"role": "user", "content": message})
         session.history.append({"role": "assistant", "content": answer})
-        if len(session.history) > 20:
-            session.history = session.history[-20:]
+        max_history = settings.MAX_SESSION_HISTORY_MESSAGES
+        if max_history > 0 and len(session.history) > max_history:
+            session.history = session.history[-max_history:]
     except Exception:
         logger.exception("General LLM/RAG call failed")
         return ChatResponse(

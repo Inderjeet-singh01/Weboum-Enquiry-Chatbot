@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     RAG_FINAL_TOP_K: int = 5
     RAG_MAX_CONTEXT_CHARS: int = 6000
 
+    # Conversation history settings
+    CHAT_HISTORY_CONTEXT_MESSAGES: int = 6
+    MAX_SESSION_HISTORY_MESSAGES: int = 20
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
