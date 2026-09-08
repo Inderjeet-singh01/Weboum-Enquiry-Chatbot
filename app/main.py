@@ -34,6 +34,12 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api")
 
 
+@app.get("/health", tags=["health"])
+async def health_check() -> dict[str, str]:
+    """Lightweight production health check endpoint."""
+    return {"status": "ok"}
+
+
 @app.middleware("http")
 async def no_cache_static_middleware(request: Request, call_next):
     response = await call_next(request)

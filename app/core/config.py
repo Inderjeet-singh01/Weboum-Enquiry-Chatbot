@@ -36,7 +36,14 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        if not self.CORS_ORIGINS:
+            return []
+        cleaned: list[str] = []
+        for origin in self.CORS_ORIGINS.split(","):
+            item = origin.strip().strip("'\"").rstrip("/")
+            if item:
+                cleaned.append(item)
+        return cleaned
 
     @property
     def knowledge_path(self) -> Path:

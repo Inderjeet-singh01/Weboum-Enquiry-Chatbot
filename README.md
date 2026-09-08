@@ -96,15 +96,24 @@ python scripts/create_embeddings.py
 
 Then start **one** Uvicorn worker:
 
+### Development
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 - Web UI: http://127.0.0.1:8000/
 - API: http://127.0.0.1:8000/api/chat
+- Health Check: http://127.0.0.1:8000/health
 - OpenAPI: http://127.0.0.1:8000/docs
 
-Do not use multiple Uvicorn workers for this MVP. Each process has its own memory.
+### Production / Render
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+- Health Check Path: `/health` (HTTP 200 `{"status": "ok"}`)
+- Do not use `--reload` in production.
+- Do not use multiple Uvicorn workers for this MVP. Each process has its own memory.
 
 ---
 
@@ -178,11 +187,11 @@ README.md
 
 ---
 
-## 5. API Endpoint
-
-`POST /api/chat`
-
-That is the only public chatbot endpoint. Do not add per-step or per-topic routes.
+## 5. API Endpoints
+ 
+ - `POST /api/chat` — The primary public chatbot turn endpoint.
+ - `GET /health` — Lightweight health check endpoint returning `{"status": "ok"}` (HTTP 200) for deployment monitors.
+ - `GET /api/all-sessions` — Active sessions debug inspector.
 
 ---
 
