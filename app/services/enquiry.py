@@ -128,17 +128,32 @@ def empty_enquiry_data() -> dict[str, str | None]:
     return {key: None for key in ENQUIRY_FIELD_ORDER}
 
 
+MAPPED_FIELD_LABELS = [
+    ("biggest_operational_challenge", "Biggest Operational Challenge"),
+    ("ai_capability", "AI Capability / Area of Interest"),
+    ("primary_industry", "Primary Industry"),
+    ("business_size", "Business Size"),
+    ("full_name", "Full Name"),
+    ("company_name", "Company Name"),
+    ("work_email", "Work Email"),
+    ("phone_number", "Phone Number"),
+    ("current_technology_stack", "Current Technology Stack"),
+]
+
+
 @dataclass
 class Session:
     mode: str = ConversationMode.initial.value
     current_step: str | None = None
     data: dict[str, str | None] = field(default_factory=empty_enquiry_data)
     completed: bool = False
+    email_sent: bool = False
 
 
 def start_enquiry(session: Session) -> ChatResponse:
     session.mode = ConversationMode.enquiry.value
     session.completed = False
+    session.email_sent = False
     session.data = empty_enquiry_data()
     session.current_step = FIRST_STEP
     return step_response(FIRST_STEP)
@@ -188,6 +203,21 @@ def build_enquiry_object(session_id: str, session: Session) -> dict[str, str | N
     except (ValueError, ValidationError):
         validated = dict(session.data)
     return {"session_id": session_id, **validated}
+
+
+def map_enquiry_data(enquiry: dict[str, str | None]) -> dict[str, list[dict[str, str]]]:
+    session_id = str(enquiry.get("session_id") or "")
+    mapped_data = []
+    for key, label in MAPPED_FIELD_LABELS:
+        value = enquiry.get(key)
+        mapped_data.append(
+            {
+                "session_id": session_id,
+                "field": label,
+                "value": "" if value is None else str(value),
+            }
+        )
+    return {"mapped_data": mapped_data}
 
 
 def step_response(step_key: str, prefix: str | None = None) -> ChatResponse:

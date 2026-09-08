@@ -13,7 +13,14 @@ from groq import AsyncGroq
 from app.core.config import settings
 from app.prompts.general import COMPANY_KNOWLEDGE, GENERAL_SYSTEM_PROMPT
 from app.schemas.chat import ChatResponse, ConversationMode, ResponseType
-from app.services.enquiry import Session, build_enquiry_object, process_enquiry_answer, start_enquiry
+from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError, send_enquiry_email
+from app.services.enquiry import (
+    Session,
+    build_enquiry_object,
+    map_enquiry_data,
+    process_enquiry_answer,
+    start_enquiry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +132,7 @@ async def _handle_locked(session_id: str, message: str) -> ChatResponse:
         return _handle_initial(session, message)
 
     if session.mode == ConversationMode.enquiry.value:
-        return _handle_enquiry(session_id, session, message)
+        return await _handle_enquiry(session_id, session, message)
 
     if session.mode == ConversationMode.general.value:
         return await _handle_general(session, message)
@@ -181,15 +188,39 @@ def _handle_initial(session: Session, message: str) -> ChatResponse:
     )
 
 
-def _handle_enquiry(session_id: str, session: Session, message: str) -> ChatResponse:
+async def _handle_enquiry(session_id: str, session: Session, message: str) -> ChatResponse:
     _require_message(message)
     if session.completed and message == ANYTHING_ELSE:
         return _switch_to_general(session)
+    if session.completed:
+        if not session.email_sent:
+            return _email_failure_response()
+        return process_enquiry_answer(session, message)
+
     already_complete = session.completed
     response = process_enquiry_answer(session, message)
     if response.completed and not already_complete:
-        _completed_enquiries.append(build_enquiry_object(session_id, session))
+        enquiry = build_enquiry_object(session_id, session)
+        _completed_enquiries.append(enquiry)
+        try:
+            await send_enquiry_email(map_enquiry_data(enquiry))
+            session.email_sent = True
+        except EmailSendError:
+            logger.exception("Enquiry notification email failed")
+            session.email_sent = False
+            return _email_failure_response()
     return response
+
+
+def _email_failure_response() -> ChatResponse:
+    return ChatResponse(
+        message=EMAIL_FAILURE_MESSAGE,
+        type=ResponseType.text,
+        suggestions=["Anything Else?"],
+        mode=ConversationMode.enquiry,
+        step=None,
+        completed=True,
+    )
 
 
 def _switch_to_general(session: Session) -> ChatResponse:

@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "openai/gpt-oss-120b"
     APP_ENV: str = "development"
     CORS_ORIGINS: str = "http://localhost:3000"
+    BREVO_API_KEY: str = ""
+    ENQUIRY_EMAIL_TO: str = ""
+    BREVO_SENDER_EMAIL: str = ""
+    BREVO_SENDER_NAME: str = "Website Enquiry Bot"
 
     @property
     def cors_origins_list(self) -> list[str]:

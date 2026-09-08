@@ -403,3 +403,27 @@ def test_one_digit_tech_stack_is_rejected(client):
     assert res["step"] == "current_technology_stack"
     assert res["completed"] is False
     assert "tools or technology stack" in res["message"].lower()
+
+
+def test_email_sent_on_completion(client, mock_email):
+    run_enquiry_until(client, "email-test")
+    assert len(mock_email) == 1
+    mapped = mock_email[0]["mapped_data"]
+    assert len(mapped) == 9
+    assert mapped[0]["session_id"] == "email-test"
+    assert mapped[4]["field"] == "Full Name"
+    assert mapped[4]["value"] == "Ada Lovelace"
+
+
+def test_email_failure_returns_failure_message(client, monkeypatch):
+    from app.services.email import EmailSendError
+
+    async def fail_send(mapped):
+        raise EmailSendError("Failed")
+
+    monkeypatch.setattr("app.services.chatbot.send_enquiry_email", fail_send)
+
+    res = run_enquiry_until(client, "fail-email")
+    assert "could not notify our team" in res["message"].lower()
+    assert res["completed"] is True
+

@@ -28,3 +28,15 @@ def mock_llm(monkeypatch):
 
     monkeypatch.setattr(chatbot, "generate_general_answer", fake_answer)
     return fake_answer
+
+
+@pytest.fixture(autouse=True)
+def mock_email(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_send(mapped: dict) -> None:
+        calls.append(mapped)
+
+    monkeypatch.setattr("app.services.chatbot.send_enquiry_email", fake_send)
+    return calls
+
