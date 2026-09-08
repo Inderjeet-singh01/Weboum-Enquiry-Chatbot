@@ -89,10 +89,15 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
         return response
 
 
-async def generate_general_answer(user_question: str, context: str = "") -> str:
+async def generate_general_answer(
+    user_question: str,
+    context: str = "",
+    history: list[dict[str, str]] | None = None,
+) -> str:
     """Answer a website/company question using retrieved RAG context.
 
     ``context`` is the pre-built retrieved-website-context block (or empty).
+    ``history`` is recent conversation turns (roles 'user' and 'assistant').
     Mock this in tests.
     """
     if not settings.GROQ_API_KEY:
@@ -103,15 +108,22 @@ async def generate_general_answer(user_question: str, context: str = "") -> str:
     else:
         system_content = GENERAL_SYSTEM_PROMPT
 
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+    if history:
+        for turn in history[-6:]:
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": f"USER QUESTION:\n{user_question}"})
+
     client = AsyncGroq(api_key=settings.GROQ_API_KEY)
     completion = await client.chat.completions.create(
         model=settings.LLM_MODEL,
         temperature=0.2,
         max_tokens=700,
-        messages=[
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": f"USER QUESTION:\n{user_question}"},
-        ],
+        messages=messages,
     )
     content = completion.choices[0].message.content
     if not content or not content.strip():
@@ -257,8 +269,12 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         return start_enquiry(session)
 
     try:
-        context = await _build_rag_context(message)
-        answer = await generate_general_answer(message, context)
+        context = await _build_rag_context(message, session.history)
+        answer = await generate_general_answer(message, context, session.history)
+        session.history.append({"role": "user", "content": message})
+        session.history.append({"role": "assistant", "content": answer})
+        if len(session.history) > 20:
+            session.history = session.history[-20:]
     except Exception:
         logger.exception("General LLM/RAG call failed")
         return ChatResponse(
@@ -280,16 +296,54 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
     )
 
 
-async def _build_rag_context(question: str) -> str:
+def _resolve_retrieval_query(
+    question: str,
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    q = question.strip()
+    words = q.split()
+    lower_q = q.lower()
+
+    contact_terms = {
+        "address", "phone", "telephone", "mobile", "email", "mail",
+        "office", "location", "headquarters", "hq", "hours", "timings",
+        "contact", "reach", "call",
+    }
+
+    is_short = len(words) <= 3
+    has_contact = any(term in lower_q for term in contact_terms)
+    has_company_name = "weboum" in lower_q
+
+    if not has_company_name:
+        prev_user_text = ""
+        if history:
+            for turn in reversed(history):
+                if turn.get("role") == "user":
+                    prev_user_text = turn.get("content", "").strip()
+                    break
+
+        if is_short and prev_user_text and not has_contact:
+            return f"Weboum Technology {prev_user_text} {q}"
+        elif has_contact:
+            return f"Weboum Technology {q}"
+        else:
+            return f"Weboum Technology {q}"
+
+    return q
+
+
+async def _build_rag_context(
+    question: str,
+    history: list[dict[str, str]] | None = None,
+) -> str:
     """Retrieve and format RAG context for a general question.
 
-    Runs the CPU-bound retrieval in a worker thread so the event loop stays
-    responsive, and never throws: missing/corrupt/misconfigured retrieval is
-    logged and degrades to empty context (the general prompt then tells the
-    model the information is not available).
+    Resolves follow-ups and short queries (e.g. 'address', 'phone', 'pricing')
+    by contextualizing the retrieval query with recent conversation topic.
     """
+    query_for_retrieval = _resolve_retrieval_query(question, history)
     try:
-        chunks = await asyncio.to_thread(rag.retrieve, question)
+        chunks = await asyncio.to_thread(rag.retrieve, query_for_retrieval)
     except rag.RAGError:
         logger.exception("RAG retrieval failed for general question")
         return ""

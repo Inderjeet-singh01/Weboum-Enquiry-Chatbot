@@ -148,6 +148,7 @@ class Session:
     data: dict[str, str | None] = field(default_factory=empty_enquiry_data)
     completed: bool = False
     email_sent: bool = False
+    history: list[dict[str, str]] = field(default_factory=list)
 
 
 def start_enquiry(session: Session) -> ChatResponse:

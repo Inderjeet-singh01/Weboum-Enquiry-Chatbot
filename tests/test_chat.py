@@ -285,6 +285,41 @@ def test_general_question_does_not_enter_enquiry_mode(client, mock_llm):
     assert chatbot._sessions["stay-general"].mode == "general"
 
 
+def test_general_mode_tracks_conversation_history(client, mock_llm):
+    session_id = "history-session"
+    start_session(client, session_id)
+    send(client, session_id, "Website / General Question")
+    send(client, session_id, "Give me contact information.")
+    send(client, session_id, "address")
+
+    session = chatbot._sessions[session_id]
+    assert len(session.history) == 4
+    assert session.history[0]["role"] == "user"
+    assert session.history[0]["content"] == "Give me contact information."
+    assert session.history[1]["role"] == "assistant"
+    assert session.history[2]["role"] == "user"
+    assert session.history[2]["content"] == "address"
+    assert session.history[3]["role"] == "assistant"
+
+
+def test_resolve_retrieval_query_contextualizes_short_and_contact_terms():
+    # Short query or contact term without previous context
+    q1 = chatbot._resolve_retrieval_query("address", [])
+    assert q1 == "Weboum Technology address"
+
+    # Short follow up with previous user message
+    history = [{"role": "user", "content": "What AI services do you provide?"}]
+    q2 = chatbot._resolve_retrieval_query("pricing?", history)
+    assert "Weboum Technology" in q2
+    assert "pricing?" in q2
+    assert "What AI services do you provide?" in q2
+
+    # Query already containing Weboum
+    q3 = chatbot._resolve_retrieval_query("What does Weboum do?")
+    assert q3 == "What does Weboum do?"
+
+
+
 def test_invalid_conversation_states_are_handled_safely(client):
     start_session(client, "invalid")
     data = send(client, "invalid", "Random click").json()
