@@ -109,29 +109,170 @@ function handleSend() {
 
 async function sendMessage(text) {
   setLoading(true);
+  let activeBotGroup = null;
+  let bubbleTextSpan = null;
+  let cursorSpan = null;
+  let accumulatedText = '';
+
+  const isGeneralQuery = (currentMode === 'general' && text !== 'Anything Else?' && text !== 'Enquire Now');
+
+  // 1. Show the AI message container immediately for general questions
+  if (isGeneralQuery) {
+    typingIndicator.classList.remove('active');
+    activeBotGroup = document.createElement('div');
+    activeBotGroup.className = 'message-group bot';
+    activeBotGroup.innerHTML = `
+      <div class="msg-avatar">AI</div>
+      <div class="msg-content-wrapper">
+        <div class="message-bubble"><span class="bubble-text"></span><span class="streaming-cursor"></span></div>
+        <div class="msg-timestamp">${formatTime(new Date())}</div>
+      </div>
+    `;
+    messagesContainer.appendChild(activeBotGroup);
+    bubbleTextSpan = activeBotGroup.querySelector('.bubble-text');
+    cursorSpan = activeBotGroup.querySelector('.streaming-cursor');
+    scrollToBottom();
+  }
+
   try {
     const payload = {
       session_id: currentSessionId,
       message: text
     };
 
-    const res = await fetch(`${API_BASE}/api/chat`, {
+    const res = await fetch(`${API_BASE}/api/chat?stream=true`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+        'x-stream': 'true'
+      },
       body: JSON.stringify(payload)
     });
 
-    const data = await res.json();
     if (!res.ok) {
-      appendBotMessage(`⚠️ Error: ${data.detail || 'Something went wrong.'}`, []);
+      if (activeBotGroup) activeBotGroup.remove();
+      const errData = await res.json().catch(() => ({}));
+      appendBotMessage(`⚠️ Error: ${errData.detail || 'Something went wrong.'}`, []);
       return;
     }
 
-    handleBotResponse(data);
+    const contentType = res.headers.get('content-type') || '';
+
+    // If response is standard JSON (business enquiry flow, initial options, etc.)
+    if (contentType.includes('application/json') || !res.body) {
+      if (activeBotGroup) activeBotGroup.remove();
+      const data = await res.json();
+      handleBotResponse(data);
+      return;
+    }
+
+    // 2. Start reading the response stream
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const jsonStr = trimmed.replace(/^data:\s*/, '');
+        if (!jsonStr) continue;
+
+        try {
+          const event = JSON.parse(jsonStr);
+
+          if (event.type === 'chunk' || event.type === 'delta') {
+            // 3. As each text chunk arrives from the server: append text and scroll
+            if (!activeBotGroup) {
+              typingIndicator.classList.remove('active');
+              activeBotGroup = document.createElement('div');
+              activeBotGroup.className = 'message-group bot';
+              activeBotGroup.innerHTML = `
+                <div class="msg-avatar">AI</div>
+                <div class="msg-content-wrapper">
+                  <div class="message-bubble"><span class="bubble-text"></span><span class="streaming-cursor"></span></div>
+                  <div class="msg-timestamp">${formatTime(new Date())}</div>
+                </div>
+              `;
+              messagesContainer.appendChild(activeBotGroup);
+              bubbleTextSpan = activeBotGroup.querySelector('.bubble-text');
+              cursorSpan = activeBotGroup.querySelector('.streaming-cursor');
+            }
+            accumulatedText += (event.content || '');
+            bubbleTextSpan.textContent = accumulatedText;
+            scrollToBottom();
+          } else if (event.type === 'done') {
+            // 4. When streaming completes: finalize bubble, show suggestions, re-enable input
+            if (cursorSpan) cursorSpan.remove();
+
+            if (event.session_id) {
+              currentSessionId = event.session_id;
+              sessionStorage.setItem('weboum_session_id', currentSessionId);
+              sessionIdDisplay.textContent = currentSessionId.substring(0, 8) + '...';
+            }
+
+            currentMode = event.mode || 'general';
+            currentStep = event.step || null;
+            isCompleted = !!event.completed;
+
+            updateEnquiryTracker();
+            updateInputPlaceholder('text', currentStep);
+
+            const suggestions = event.suggestions || ['Anything Else?', 'Enquire Now'];
+            if (suggestions.length > 0 && activeBotGroup) {
+              const wrapper = activeBotGroup.querySelector('.msg-content-wrapper');
+              const timestampEl = activeBotGroup.querySelector('.msg-timestamp');
+              const suggestionsEl = document.createElement('div');
+              suggestionsEl.className = 'suggestions-container';
+              suggestionsEl.innerHTML = suggestions.map(s =>
+                `<button class="chip-btn" onclick="selectChip('${escapeHtml(s)}')">${escapeHtml(s)}</button>`
+              ).join('');
+              wrapper.insertBefore(suggestionsEl, timestampEl);
+            }
+            scrollToBottom();
+          } else if (event.type === 'error') {
+            if (cursorSpan) cursorSpan.remove();
+            if (bubbleTextSpan) {
+              bubbleTextSpan.textContent = `⚠️ ${event.message || 'An error occurred during generation.'}`;
+            } else {
+              appendBotMessage(`⚠️ ${event.message || 'An error occurred during generation.'}`, []);
+            }
+          }
+        } catch (parseErr) {
+          console.error('SSE JSON parse error:', parseErr, jsonStr);
+        }
+      }
+    }
+
+    // Safety fallback if connection closed without explicit done event
+    if (cursorSpan) cursorSpan.remove();
+    if (activeBotGroup && accumulatedText && !activeBotGroup.querySelector('.suggestions-container')) {
+      const wrapper = activeBotGroup.querySelector('.msg-content-wrapper');
+      const timestampEl = activeBotGroup.querySelector('.msg-timestamp');
+      const suggestionsEl = document.createElement('div');
+      suggestionsEl.className = 'suggestions-container';
+      suggestionsEl.innerHTML = ['Anything Else?', 'Enquire Now'].map(s =>
+        `<button class="chip-btn" onclick="selectChip('${escapeHtml(s)}')">${escapeHtml(s)}</button>`
+      ).join('');
+      wrapper.insertBefore(suggestionsEl, timestampEl);
+      scrollToBottom();
+    }
   } catch (err) {
-    console.error('Send message error:', err);
-    appendBotMessage("⚠️ Connection error. Please verify the backend server.", []);
+    console.error('Chat error:', err);
+    if (cursorSpan) cursorSpan.remove();
+    if (!activeBotGroup) {
+      appendBotMessage("⚠️ Connection error. Please verify the backend server.", []);
+    }
   } finally {
+    if (cursorSpan) cursorSpan.remove();
     setLoading(false);
   }
 }
@@ -190,7 +331,11 @@ function updateInputPlaceholder(type, step) {
   } else if (step === 'current_technology_stack') {
     messageInput.placeholder = 'e.g. WhatsApp, Salesforce, Excel, Python...';
   } else if (type === 'options') {
-    messageInput.placeholder = 'Click an option above or type your reply...';
+    if (currentMode === 'initial') {
+      messageInput.placeholder = 'Choose "Business Enquiry" or "Website / General Question" above...';
+    } else {
+      messageInput.placeholder = 'Click an option above or type your reply...';
+    }
   } else {
     messageInput.placeholder = 'Type your question or message...';
   }
@@ -252,7 +397,9 @@ function setLoading(loading) {
   isWaiting = loading;
   sendButton.disabled = loading;
   if (loading) {
-    typingIndicator.classList.add('active');
+    if (currentMode !== 'general') {
+      typingIndicator.classList.add('active');
+    }
     scrollToBottom();
   } else {
     typingIndicator.classList.remove('active');

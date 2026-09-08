@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 import uuid
 
@@ -89,6 +90,102 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
         return response
 
 
+def is_general_question(session_id: str | None, message: str) -> bool:
+    """Return True if the message will trigger a Groq LLM completion."""
+    if not session_id or not message or not message.strip():
+        return False
+    session = _sessions.get(session_id.strip())
+    if session is None:
+        return False
+    if session.mode != ConversationMode.general.value:
+        return False
+    if message.strip() in (ANYTHING_ELSE, ENQUIRE_NOW):
+        return False
+    return True
+
+
+async def stream_chat(
+    session_id: str | None,
+    message: str,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Stream LLM response chunk-by-chunk for general website questions."""
+    if not session_id or not session_id.strip():
+        session_id = uuid.uuid4().hex
+    else:
+        session_id = session_id.strip()
+
+    lock = await _lock_for(session_id)
+    async with lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            session = Session()
+            _sessions[session_id] = session
+            resp = _initial_response()
+            yield {"type": "chunk", "content": resp.message}
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "message": resp.message,
+                "suggestions": resp.suggestions,
+                "mode": resp.mode.value,
+            }
+            return
+
+        if session.mode != ConversationMode.general.value or message.strip() in (ANYTHING_ELSE, ENQUIRE_NOW):
+            resp = await _handle_locked(session_id, message)
+            yield {"type": "chunk", "content": resp.message}
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "message": resp.message,
+                "suggestions": resp.suggestions,
+                "mode": resp.mode.value,
+                "step": resp.step,
+                "completed": resp.completed,
+            }
+            return
+
+        _require_message(message)
+        full_answer_parts: list[str] = []
+        try:
+            context = await _build_rag_context(message, session.history)
+            async for chunk in stream_general_answer(message, context, session.history):
+                if chunk:
+                    full_answer_parts.append(chunk)
+                    yield {"type": "chunk", "content": chunk}
+
+            full_answer = "".join(full_answer_parts).strip()
+            if not full_answer:
+                raise RuntimeError("LLM returned empty stream")
+
+            session.history.append({"role": "user", "content": message})
+            session.history.append({"role": "assistant", "content": full_answer})
+            max_history = settings.MAX_SESSION_HISTORY_MESSAGES
+            if max_history > 0 and len(session.history) > max_history:
+                session.history = session.history[-max_history:]
+
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "message": full_answer,
+                "suggestions": list(GENERAL_FOLLOW_UP),
+                "mode": ConversationMode.general.value,
+            }
+        except Exception:
+            logger.exception("Streaming LLM/RAG call failed")
+            yield {"type": "chunk", "content": LLM_FALLBACK_MESSAGE}
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "message": LLM_FALLBACK_MESSAGE,
+                "suggestions": list(GENERAL_FOLLOW_UP),
+                "mode": ConversationMode.general.value,
+            }
+
+
+handle_chat_stream = stream_chat
+
+
 async def generate_general_answer(
     user_question: str,
     context: str = "",
@@ -131,6 +228,46 @@ async def generate_general_answer(
     if not content or not content.strip():
         raise RuntimeError("LLM returned an empty answer")
     return content.strip()
+
+
+async def stream_general_answer(
+    user_question: str,
+    context: str = "",
+    history: list[dict[str, str]] | None = None,
+) -> AsyncGenerator[str, None]:
+    """Stream token chunks for a website/company question using retrieved RAG context."""
+    if not settings.GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+
+    if context:
+        system_content = f"{GENERAL_SYSTEM_PROMPT}\n\nRETRIEVED WEBSITE CONTEXT:\n{context}"
+    else:
+        system_content = GENERAL_SYSTEM_PROMPT
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+    if history:
+        limit = settings.CHAT_HISTORY_CONTEXT_MESSAGES
+        history_slice = history[-limit:] if limit > 0 else []
+        for turn in history_slice:
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": f"USER QUESTION:\n{user_question}"})
+
+    client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+    stream = await client.chat.completions.create(
+        model=settings.LLM_MODEL,
+        temperature=0.2,
+        max_tokens=700,
+        messages=messages,
+        stream=True,
+    )
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            yield delta
 
 
 async def _lock_for(session_id: str) -> asyncio.Lock:

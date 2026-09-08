@@ -308,6 +308,8 @@ body {
   font-size: 14.5px;
   word-break: break-word;
   white-space: pre-wrap;
+  min-height: 48px;
+  box-sizing: border-box;
 }
 
 .bot .message-bubble {
@@ -322,6 +324,22 @@ body {
   color: #ffffff;
   border-top-right-radius: 4px;
   box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 3px;
+  vertical-align: middle;
+  background-color: var(--accent);
+  border-radius: 2px;
+  animation: streamBlink 0.8s infinite ease-in-out;
+}
+
+@keyframes streamBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 .msg-timestamp {
