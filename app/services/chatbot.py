@@ -11,8 +11,9 @@ from fastapi import HTTPException
 from groq import AsyncGroq
 
 from app.core.config import settings
-from app.prompts.general import COMPANY_KNOWLEDGE, GENERAL_SYSTEM_PROMPT
+from app.prompts.general import GENERAL_SYSTEM_PROMPT
 from app.schemas.chat import ChatResponse, ConversationMode, ResponseType
+from app.services import rag
 from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError, send_enquiry_email
 from app.services.enquiry import (
     Session,
@@ -88,10 +89,19 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
         return response
 
 
-async def generate_general_answer(user_question: str) -> str:
-    """Answer a website/company question from centralized knowledge. Mock this in tests."""
+async def generate_general_answer(user_question: str, context: str = "") -> str:
+    """Answer a website/company question using retrieved RAG context.
+
+    ``context`` is the pre-built retrieved-website-context block (or empty).
+    Mock this in tests.
+    """
     if not settings.GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not configured")
+
+    if context:
+        system_content = f"{GENERAL_SYSTEM_PROMPT}\n\nRETRIEVED WEBSITE CONTEXT:\n{context}"
+    else:
+        system_content = GENERAL_SYSTEM_PROMPT
 
     client = AsyncGroq(api_key=settings.GROQ_API_KEY)
     completion = await client.chat.completions.create(
@@ -99,14 +109,8 @@ async def generate_general_answer(user_question: str) -> str:
         temperature=0.2,
         max_tokens=700,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    f"{GENERAL_SYSTEM_PROMPT}\n\n"
-                    f"WEBSITE / COMPANY KNOWLEDGE:\n{COMPANY_KNOWLEDGE}"
-                ),
-            },
-            {"role": "user", "content": user_question},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": f"USER QUESTION:\n{user_question}"},
         ],
     )
     content = completion.choices[0].message.content
@@ -253,9 +257,10 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         return start_enquiry(session)
 
     try:
-        answer = await generate_general_answer(message)
+        context = await _build_rag_context(message)
+        answer = await generate_general_answer(message, context)
     except Exception:
-        logger.exception("General LLM call failed")
+        logger.exception("General LLM/RAG call failed")
         return ChatResponse(
             message=LLM_FALLBACK_MESSAGE,
             type=ResponseType.text,
@@ -273,6 +278,22 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         step=None,
         completed=False,
     )
+
+
+async def _build_rag_context(question: str) -> str:
+    """Retrieve and format RAG context for a general question.
+
+    Runs the CPU-bound retrieval in a worker thread so the event loop stays
+    responsive, and never throws: missing/corrupt/misconfigured retrieval is
+    logged and degrades to empty context (the general prompt then tells the
+    model the information is not available).
+    """
+    try:
+        chunks = await asyncio.to_thread(rag.retrieve, question)
+    except rag.RAGError:
+        logger.exception("RAG retrieval failed for general question")
+        return ""
+    return rag.format_context(chunks)
 
 
 def _require_message(message: str) -> None:

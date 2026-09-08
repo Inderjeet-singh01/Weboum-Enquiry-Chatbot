@@ -20,7 +20,7 @@ def client():
 
 @pytest.fixture
 def mock_llm(monkeypatch):
-    async def fake_answer(question: str) -> str:
+    async def fake_answer(question: str, context: str = "", *args, **kwargs) -> str:
         return (
             "We provide technology solutions including AI/ML development, "
             "automation, custom software and other digital solutions."

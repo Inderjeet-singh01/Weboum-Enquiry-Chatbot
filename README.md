@@ -1,6 +1,6 @@
 # Company Website Chatbot (MVP)
 
-Async FastAPI backend for a company-website chatbot. One endpoint drives every turn. Business enquiry is a fixed Python state machine. Website questions go through an LLM grounded in a single knowledge file. Conversation state lives only in process memory.
+Async FastAPI backend for a company-website chatbot. One endpoint drives every turn. Business enquiry is a fixed Python state machine with Brevo email notifications. Website questions go through a Groq LLM grounded in semantic vector embeddings retrieved locally without an external vector database. Conversation state lives in process memory.
 
 ---
 
@@ -24,9 +24,9 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 
 1. New session → `Hi! How can I help you today?` with exactly `Business Enquiry` and `Website / General Question`
 2. `Business Enquiry` → 9 fixed steps in `app/services/enquiry.py` (`ENQUIRY_FIELD_ORDER`). LLM never chooses the next step
-3. After step 9 → confirmation, `completed: true`, enquiry object stored in `_completed_enquiries`, suggestion exactly `Anything Else?`
+3. After step 9 → confirmation, `completed: true`, enquiry emailed to team via Brevo, stored in `_completed_enquiries`, suggestion exactly `Anything Else?`
 4. After submit, `Anything Else?` switches **the same session** to `mode=general` (`Sure! What else would you like to know?`)
-5. `Website / General Question` → `mode=general`, user asks a question, Groq LLM + `app/prompts/general.py`, then exactly `Anything Else?` and `Enquire Now`
+5. `Website / General Question` → `mode=general`, user asks a question, local vector embedding retrieval + Groq LLM, then exactly `Anything Else?` and `Enquire Now`
 6. `Anything Else?` stays in general
 7. `Enquire Now` switches **the same session** to enquiry at step 1
 
@@ -46,14 +46,20 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 
 | Path | Role |
 |------|------|
-| `app/main.py` | FastAPI app, CORS, router include. No business logic |
-| `app/api/chat.py` | `POST /api/chat` only |
+| `app/main.py` | FastAPI app, CORS, router include, static files mount. No business logic |
+| `app/api/chat.py` | `POST /api/chat` and `GET /api/all-sessions` |
 | `app/schemas/chat.py` | `ChatRequest`, `ChatResponse` |
-| `app/core/config.py` | `GROQ_API_KEY`, `LLM_MODEL`, `APP_ENV`, `CORS_ORIGINS` |
+| `app/core/config.py` | Settings: Groq, Brevo, CORS, and embedding model paths |
 | `app/services/chatbot.py` | Runtime sessions, locks, routing, Groq call (`generate_general_answer`) |
 | `app/services/enquiry.py` | Deterministic enquiry machine, validation, `Session` dataclass |
-| `app/prompts/general.py` | `GENERAL_SYSTEM_PROMPT` + `COMPANY_KNOWLEDGE` (edit company facts here only) |
-| `tests/test_chat.py` | Acceptance tests; LLM is mocked |
+| `app/services/email.py` | Async Brevo transactional email sender for completed enquiries |
+| `app/services/rag.py` | Dense vector embedding retrieval, NumPy cosine similarity, context budget |
+| `app/prompts/general.py` | `GENERAL_SYSTEM_PROMPT` (context-grounded prompt without hardcoded facts) |
+| `scripts/create_embeddings.py` | Offline embedding generator (JSON knowledge → `data/embeddings.pkl`) |
+| `data/embeddings.pkl` | Precomputed vector embeddings index (423 chunks × 384 dimensions) |
+| `company-docs/weboum_knowledge.json` | Weboum company knowledge base (crawled documentation) |
+| `tests/test_chat.py` | Acceptance tests; LLM and email are mocked |
+| `tests/test_rag.py` | Unit tests for vector retrieval, context formatting, and index loading |
 
 **Runtime store (module globals in `chatbot.py`)**
 
@@ -64,13 +70,12 @@ Read this section before opening the rest of the repo. It is the map of behaviou
 
 **Out of scope on purpose**
 
-No database, Redis, Docker, CRM, email sending, RAG/vector store, extra chat endpoints, or multi-worker design.
+No external vector database (Chroma/Pinecone), Redis, Docker, SQL database, or multi-worker design.
 
-**Replace later**
+**Future extensions**
 
-- Company copy: `app/prompts/general.py` → `COMPANY_KNOWLEDGE`
-- Persistence: swap the in-memory dict; keep `handle_chat` / enquiry API the same
-- RAG: retrieve chunks, still pass them into `generate_general_answer`
+- Re-run `scripts/create_embeddings.py` whenever `company-docs/weboum_knowledge.json` changes
+- Persistence: swap the in-memory dict with a database; keep `handle_chat` / enquiry API the same
 
 ---
 
@@ -83,12 +88,19 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GROQ_API_KEY` in `.env`. Then start **one** Uvicorn worker:
+Set `GROQ_API_KEY` and Brevo email variables in `.env`. Precompute the embeddings (already generated):
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+python scripts/create_embeddings.py
 ```
 
+Then start **one** Uvicorn worker:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+- Web UI: http://127.0.0.1:8000/
 - API: http://127.0.0.1:8000/api/chat
 - OpenAPI: http://127.0.0.1:8000/docs
 
@@ -100,8 +112,8 @@ Do not use multiple Uvicorn workers for this MVP. Each process has its own memor
 
 The chatbot on the company website has two entry points:
 
-1. **Business Enquiry** — nine questions, one at a time, exact order, Python-controlled.
-2. **Website / General Question** — LLM answers from centralized website knowledge, then offers Anything Else? or Enquire Now.
+1. **Business Enquiry** — nine questions, one at a time, exact order, Python-controlled. Completed submissions are emailed directly to the team via Brevo.
+2. **Website / General Question** — User queries are converted to dense vector embeddings, matched via cosine similarity against `data/embeddings.pkl` in memory, and answered accurately by the Groq LLM.
 
 There is no database. Sessions and completed enquiries exist only while this process is running.
 
@@ -109,41 +121,55 @@ There is no database. Sessions and completed enquiries exist only while this pro
 
 ## 3. Architecture
 
-```
-Frontend
+```text
+Frontend (Widget / UI)
    │  POST /api/chat  { session_id, message }
    ▼
 app/api/chat.py
    ▼
-app/services/chatbot.py          # session + mode router
+app/services/chatbot.py               # session + mode router
    ├── initial greeting
-   ├── enquiry  → app/services/enquiry.py
-   └── general  → Groq LLM + app/prompts/general.py
+   ├── enquiry  → app/services/enquiry.py → app/services/email.py (Brevo)
+   └── general  → app/services/rag.py (embeddings.pkl) → Groq LLM
    ▼
 ChatResponse { message, type, suggestions, mode, step, completed }
 ```
 
 - FastAPI + Uvicorn, async endpoint and async LLM call
 - Pydantic v2 request/response models
-- pydantic-settings for environment variables
+- Local vector embeddings with `BAAI/bge-small-en-v1.5` and NumPy dot product (no vector DB)
 - Enquiry sequence is data in `enquiry.py`, not prompt text
 
 ---
 
 ## 4. Folder Structure
 
-```
+```text
 app/
 ├── main.py
 ├── api/chat.py
 ├── schemas/chat.py
 ├── core/config.py
-├── services/chatbot.py
-├── services/enquiry.py
+├── services/
+│   ├── chatbot.py
+│   ├── enquiry.py
+│   ├── email.py
+│   └── rag.py
 └── prompts/general.py
+company-docs/
+└── weboum_knowledge.json
+data/
+└── embeddings.pkl
+scripts/
+└── create_embeddings.py
+static/
+├── index.html
+├── style.css
+└── script.js
 tests/
 ├── conftest.py
-└── test_chat.py
+├── test_chat.py
+└── test_rag.py
 .env.example
 .gitignore
 requirements.txt
@@ -156,7 +182,7 @@ README.md
 
 `POST /api/chat`
 
-That is the only chatbot endpoint. Do not add per-step or per-topic routes.
+That is the only public chatbot endpoint. Do not add per-step or per-topic routes.
 
 ---
 
@@ -171,7 +197,7 @@ That is the only chatbot endpoint. Do not add per-step or per-topic routes.
 
 | Field | Rules |
 |-------|--------|
-| `session_id` | Required, non-empty after strip |
+| `session_id` | Required, non-empty after strip (auto-generated if omitted) |
 | `message` | Stripped. Empty is OK only on the first request for that id |
 
 ---
@@ -201,9 +227,8 @@ Questions are asked one by one. Option steps require an exact match against the 
 
 - `completed` is true
 - confirmation message is returned
+- an enquiry notification is sent to the team via Brevo transactional email
 - an enquiry object is appended to in-memory `_completed_enquiries`
-
-No CRM, email, or disk write.
 
 ---
 
@@ -211,11 +236,13 @@ No CRM, email, or disk write.
 
 1. User selects `Website / General Question`
 2. Bot: `Sure! What would you like to know about us?`
-3. User types a question
-4. Groq uses `GENERAL_SYSTEM_PROMPT` + `COMPANY_KNOWLEDGE`
-5. Answer plus suggestions `["Anything Else?", "Enquire Now"]`
-6. `Anything Else?` → stay in general, invite another question
-7. `Enquire Now` → same `session_id`, enquiry step 1
+3. User types a question (e.g. `"address"`, `"What services do you provide?"`)
+4. Query is embedded into a 384-d vector and compared via cosine similarity against `data/embeddings.pkl`
+5. Most relevant chunks are selected within the character budget and injected into `GENERAL_SYSTEM_PROMPT`
+6. Groq LLM generates a factual, grounded response
+7. Answer is returned plus suggestions `["Anything Else?", "Enquire Now"]`
+8. `Anything Else?` → stay in general, invite another question
+9. `Enquire Now` → same `session_id`, enquiry step 1
 
 Unrelated questions (weather, sports, etc.) are refused by the system prompt; the model must not invent company facts.
 
@@ -253,9 +280,15 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | Variable | Purpose |
 |----------|---------|
 | `GROQ_API_KEY` | Groq API key (required for live general answers) |
-| `LLM_MODEL` | Default `llama-3.3-70b-versatile` |
+| `LLM_MODEL` | Default `openai/gpt-oss-120b` |
 | `APP_ENV` | e.g. `development` |
 | `CORS_ORIGINS` | Comma-separated origins, e.g. `http://localhost:3000` |
+| `BREVO_API_KEY` | Brevo API key for sending enquiry emails |
+| `ENQUIRY_EMAIL_TO` | Notification recipient email for completed enquiries |
+| `BREVO_SENDER_EMAIL` | Verified sender email configured in Brevo |
+| `BREVO_SENDER_NAME` | Display name for the email sender |
+| `EMBEDDING_MODEL` | Embedding model name. Default `BAAI/bge-small-en-v1.5` |
+| `RAG_INDEX_PATH` | Path to embeddings pickle file. Default `data/embeddings.pkl` |
 
 ---
 
@@ -279,7 +312,7 @@ The backend owns all copy and option lists.
 pytest -q
 ```
 
-Coverage includes: greeting, all nine enquiry steps, invalid email/phone, completion object, two isolated users, general answers and follow-ups, Anything Else?, Enquire Now on the same session, general text not entering enquiry, and invalid state recovery. Groq is mocked.
+Coverage includes: greeting, all nine enquiry steps, invalid email/phone, completion object, Brevo email sending, two isolated users, general answers and follow-ups, Anything Else?, Enquire Now on the same session, general text not entering enquiry, invalid state recovery, vector embedding retrieval, and context budgeting. Groq is mocked.
 
 ---
 
@@ -296,8 +329,8 @@ When you need persistence or horizontal scale, introduce Redis or a database beh
 
 ## 16. Future extension notes
 
-- Replace `COMPANY_KNOWLEDGE` with CMS, crawl, or documents
-- Add retrieval (RAG) in front of `generate_general_answer` without changing `/api/chat`
-- Persist sessions and completed enquiries
-- CRM / email on enquiry completion
+- Re-generate `data/embeddings.pkl` whenever `company-docs/weboum_knowledge.json` changes (`python scripts/create_embeddings.py`)
+- Swap the embedding model by setting `EMBEDDING_MODEL` (and regenerate the index with the same model)
+- Persist sessions and completed enquiries in Postgres or Redis
+- Direct CRM integration on enquiry completion
 - Keep enquiry order in Python; do not let the LLM drive it
