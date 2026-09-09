@@ -27,6 +27,8 @@ async def chat(request: Request, payload: ChatRequest) -> Response:
         or request.headers.get("x-stream") == "true"
         or request.query_params.get("stream") == "true"
     )
+    logger.info("Chat request received | streaming=%s", is_stream_client)
+
 
     if is_stream_client and is_general_question(payload.session_id, payload.message):
         async def event_generator():
@@ -34,7 +36,7 @@ async def chat(request: Request, payload: ChatRequest) -> Response:
                 async for event in stream_chat(payload.session_id, payload.message):
                     yield f"data: {json.dumps(event)}\n\n"
             except Exception:
-                logger.exception("Error during general chat stream")
+                logger.exception("Chat processing failed")
                 yield f"data: {json.dumps({'type': 'error', 'message': 'An error occurred during streaming.'})}\n\n"
 
         return StreamingResponse(

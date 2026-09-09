@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import time
 
 import httpx
 
@@ -40,16 +41,21 @@ async def send_enquiry_email(mapped: dict[str, list[dict[str, str]]]) -> None:
         "content-type": "application/json",
         "api-key": settings.BREVO_API_KEY,
     }
+    logger.info("Brevo email send started")
+    start_time = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(BREVO_SMTP_URL, json=payload, headers=headers)
-    except httpx.HTTPError:
-        logger.exception("Brevo enquiry email request failed")
+        if response.status_code >= 400:
+            logger.error("Brevo email send failed | status=%s", response.status_code)
+            raise EmailSendError("Enquiry email could not be sent")
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("Brevo email send completed | duration_ms=%.2f", duration_ms)
+    except EmailSendError:
+        raise
+    except Exception:
+        logger.exception("Brevo email send failed")
         raise EmailSendError("Enquiry email could not be sent") from None
-
-    if response.status_code >= 400:
-        logger.error("Brevo enquiry email failed with status %s", response.status_code)
-        raise EmailSendError("Enquiry email could not be sent")
 
 
 def build_enquiry_email_html(mapped_data: list[dict[str, str]]) -> str:

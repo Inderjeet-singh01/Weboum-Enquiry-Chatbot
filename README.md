@@ -146,7 +146,7 @@ ChatResponse { message, type, suggestions, mode, step, completed }
 
 - FastAPI + Uvicorn, async endpoint and async LLM call
 - Pydantic v2 request/response models
-- Local vector embeddings with `BAAI/bge-small-en-v1.5` and NumPy dot product (no vector DB)
+- Vector embeddings with Google Gemini Embedding 2 API (`gemini-embedding-2`, 768-dim) and NumPy dot product (no local embedding model or PyTorch required on Render)
 - Enquiry sequence is data in `enquiry.py`, not prompt text
 
 ---
@@ -296,7 +296,9 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `ENQUIRY_EMAIL_TO` | Notification recipient email for completed enquiries |
 | `BREVO_SENDER_EMAIL` | Verified sender email configured in Brevo |
 | `BREVO_SENDER_NAME` | Display name for the email sender |
-| `EMBEDDING_MODEL` | Embedding model name. Default `BAAI/bge-small-en-v1.5` |
+| `GEMINI_API_KEY` | Google Gemini API key (required for embeddings) |
+| `GEMINI_EMBEDDING_MODEL` | Embedding model name. Default `gemini-embedding-2` |
+| `EMBEDDING_DIMENSION` | Configurable vector dimensionality. Default `768` |
 | `RAG_INDEX_PATH` | Path to embeddings pickle file. Default `data/embeddings.pkl` |
 
 ---
@@ -336,10 +338,46 @@ When you need persistence or horizontal scale, introduce Redis or a database beh
 
 ---
 
-## 16. Future extension notes
+## 16. Vector Embedding Architecture (Gemini Embedding 2)
+
+The application uses Google Gemini Embedding 2 API (`gemini-embedding-2`) with 768-dimensional embeddings. The application **no longer downloads, caches, or loads any embedding model locally (no SentenceTransformers, PyTorch, or Hugging Face downloads on Render)**.
+
+### Offline Indexing Flow
+```text
+company-docs/weboum_knowledge.json
+         ↓
+build semantic chunks
+         ↓
+Gemini Embedding 2 API (batching + separate Content objects)
+         ↓
+768-dimensional document vectors
+         ↓
+data/embeddings.pkl
+```
+Run offline: `python scripts/create_embeddings.py`
+
+### Runtime Query Flow
+```text
+User Question
+      ↓
+Gemini Embedding 2 API (asymmetric formatting: task: search result | query: ...)
+      ↓
+768-dimensional query vector
+      ↓
+NumPy cosine similarity / dot product against data/embeddings.pkl
+      ↓
+Top relevant chunks
+      ↓
+Groq LLM
+      ↓
+SSE Stream to User
+```
+
+---
+
+## 17. Future extension notes
 
 - Re-generate `data/embeddings.pkl` whenever `company-docs/weboum_knowledge.json` changes (`python scripts/create_embeddings.py`)
-- Swap the embedding model by setting `EMBEDDING_MODEL` (and regenerate the index with the same model)
 - Persist sessions and completed enquiries in Postgres or Redis
 - Direct CRM integration on enquiry completion
 - Keep enquiry order in Python; do not let the LLM drive it

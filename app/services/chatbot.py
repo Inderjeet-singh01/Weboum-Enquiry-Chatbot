@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+import time
 from typing import Any
 import uuid
 
@@ -118,8 +119,10 @@ async def stream_chat(
     async with lock:
         session = _sessions.get(session_id)
         if session is None:
+            logger.info("New session created")
             session = Session()
             _sessions[session_id] = session
+            logger.info("Chat routed | mode=%s", ConversationMode.initial.value)
             resp = _initial_response()
             yield {"type": "chunk", "content": resp.message}
             yield {
@@ -145,7 +148,9 @@ async def stream_chat(
             }
             return
 
+        logger.info("Chat routed | mode=%s", session.mode)
         _require_message(message)
+        logger.info("General question started")
         full_answer_parts: list[str] = []
         try:
             context = await _build_rag_context(message, session.history)
@@ -172,7 +177,7 @@ async def stream_chat(
                 "mode": ConversationMode.general.value,
             }
         except Exception:
-            logger.exception("Streaming LLM/RAG call failed")
+            logger.exception("Chat processing failed")
             yield {"type": "chunk", "content": LLM_FALLBACK_MESSAGE}
             yield {
                 "type": "done",
@@ -217,17 +222,25 @@ async def generate_general_answer(
 
     messages.append({"role": "user", "content": f"USER QUESTION:\n{user_question}"})
 
-    client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-    completion = await client.chat.completions.create(
-        model=settings.LLM_MODEL,
-        temperature=0.2,
-        max_tokens=700,
-        messages=messages,
-    )
-    content = completion.choices[0].message.content
-    if not content or not content.strip():
-        raise RuntimeError("LLM returned an empty answer")
-    return content.strip()
+    logger.info("LLM request started | model=%s", settings.LLM_MODEL)
+    start_time = time.perf_counter()
+    try:
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        completion = await client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            temperature=0.2,
+            max_tokens=700,
+            messages=messages,
+        )
+        content = completion.choices[0].message.content
+        if not content or not content.strip():
+            raise RuntimeError("LLM returned an empty answer")
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("LLM stream completed | duration_ms=%.2f", duration_ms)
+        return content.strip()
+    except Exception:
+        logger.exception("LLM request failed")
+        raise
 
 
 async def stream_general_answer(
@@ -256,18 +269,31 @@ async def stream_general_answer(
 
     messages.append({"role": "user", "content": f"USER QUESTION:\n{user_question}"})
 
-    client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-    stream = await client.chat.completions.create(
-        model=settings.LLM_MODEL,
-        temperature=0.2,
-        max_tokens=700,
-        messages=messages,
-        stream=True,
-    )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        if delta:
-            yield delta
+    logger.info("LLM request started | model=%s", settings.LLM_MODEL)
+    start_time = time.perf_counter()
+    first_chunk_received = False
+    try:
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        stream = await client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            temperature=0.2,
+            max_tokens=700,
+            messages=messages,
+            stream=True,
+        )
+        logger.info("LLM stream started")
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                if not first_chunk_received:
+                    logger.info("LLM first chunk received")
+                    first_chunk_received = True
+                yield delta
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("LLM stream completed | duration_ms=%.2f", duration_ms)
+    except Exception:
+        logger.exception("LLM request failed")
+        raise
 
 
 async def _lock_for(session_id: str) -> asyncio.Lock:
@@ -280,9 +306,13 @@ async def _lock_for(session_id: str) -> asyncio.Lock:
 async def _handle_locked(session_id: str, message: str) -> ChatResponse:
     session = _sessions.get(session_id)
     if session is None:
-        _sessions[session_id] = Session()
+        logger.info("New session created")
+        session = Session()
+        _sessions[session_id] = session
+        logger.info("Chat routed | mode=%s", ConversationMode.initial.value)
         return _initial_response()
 
+    logger.info("Chat routed | mode=%s", session.mode)
     if session.mode == ConversationMode.initial.value:
         return _handle_initial(session, message)
 
@@ -361,7 +391,7 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
             await send_enquiry_email(map_enquiry_data(enquiry))
             session.email_sent = True
         except EmailSendError:
-            logger.exception("Enquiry notification email failed")
+            logger.exception("Brevo email send failed")
             session.email_sent = False
             return _email_failure_response()
     return response
@@ -407,6 +437,7 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
     if message == ENQUIRE_NOW:
         return start_enquiry(session)
 
+    logger.info("General question started")
     try:
         context = await _build_rag_context(message, session.history)
         answer = await generate_general_answer(message, context, session.history)
@@ -416,7 +447,7 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         if max_history > 0 and len(session.history) > max_history:
             session.history = session.history[-max_history:]
     except Exception:
-        logger.exception("General LLM/RAG call failed")
+        logger.exception("Chat processing failed")
         return ChatResponse(
             message=LLM_FALLBACK_MESSAGE,
             type=ResponseType.text,
@@ -481,11 +512,15 @@ async def _build_rag_context(
     Resolves follow-ups and short queries (e.g. 'address', 'phone', 'pricing')
     by contextualizing the retrieval query with recent conversation topic.
     """
+    logger.info("RAG started")
+    rag_start = time.perf_counter()
     query_for_retrieval = _resolve_retrieval_query(question, history)
     try:
         chunks = await asyncio.to_thread(rag.retrieve, query_for_retrieval)
-    except rag.RAGError:
-        logger.exception("RAG retrieval failed for general question")
+        duration_ms = (time.perf_counter() - rag_start) * 1000
+        logger.info("RAG completed | duration_ms=%.2f", duration_ms)
+    except Exception:
+        logger.exception("RAG failed")
         return ""
     return rag.format_context(chunks)
 

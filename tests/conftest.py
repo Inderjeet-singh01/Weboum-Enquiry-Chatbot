@@ -40,3 +40,20 @@ def mock_email(monkeypatch):
     monkeypatch.setattr("app.services.chatbot.send_enquiry_email", fake_send)
     return calls
 
+
+@pytest.fixture(autouse=True)
+def mock_gemini_embedding(monkeypatch):
+    """Provide an offline 768-dim mock for rag.embed_query so all test suites run offline."""
+    import numpy as np
+    from app.services import rag
+
+    def fake_embed_query(query: str, client=None) -> np.ndarray:
+        if not query or not query.strip():
+            return np.zeros(768, dtype=np.float32)
+        vec = np.ones(768, dtype=np.float32)
+        return vec / np.linalg.norm(vec)
+
+    monkeypatch.setattr(rag, "embed_query", fake_embed_query)
+    return fake_embed_query
+
+

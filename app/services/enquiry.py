@@ -5,6 +5,7 @@ The LLM must not choose the next step. Python owns the exact sequence.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,8 @@ from app.schemas.chat import (
     validate_tech_stack,
     validate_work_email,
 )
+
+logger = logging.getLogger(__name__)
 
 ENQUIRY_FIELD_ORDER = [
     "biggest_operational_challenge",
@@ -152,6 +155,7 @@ class Session:
 
 
 def start_enquiry(session: Session) -> ChatResponse:
+    logger.info("Enquiry flow started")
     session.mode = ConversationMode.enquiry.value
     session.completed = False
     session.email_sent = False
@@ -185,13 +189,16 @@ def process_enquiry_answer(session: Session, message: str) -> ChatResponse:
 
     error = _validate_answer(step_key, message)
     if error:
+        logger.warning("Validation failure | field=%s", step_key)
         return step_response(step_key, prefix=error)
 
     session.data[step_key] = message
+    logger.info("Enquiry step processed | step=%s", step_key)
     next_step = _next_step(step_key)
     if next_step is None:
         session.completed = True
         session.current_step = None
+        logger.info("Enquiry completed")
         return completion_response()
 
     session.current_step = next_step

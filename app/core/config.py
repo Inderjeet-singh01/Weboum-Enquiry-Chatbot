@@ -19,12 +19,15 @@ class Settings(BaseSettings):
     BREVO_SENDER_EMAIL: str = ""
     BREVO_SENDER_NAME: str = "Website Enquiry Bot"
 
+    # Gemini Embedding API settings
+    GEMINI_API_KEY: str = ""
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-2"
+    EMBEDDING_DIMENSION: int = 768
+
     # RAG / retrieval settings. These are project-relative paths and
     # configurable through environment variables so the same code works
     # locally and on Render without hardcoding machine-specific paths.
     KNOWLEDGE_PATH: str = "company-docs/weboum_knowledge.json"
-    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
-    RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     RAG_INDEX_PATH: str = "data/embeddings.pkl"
     RAG_INITIAL_TOP_K: int = 10
     RAG_FINAL_TOP_K: int = 5
