@@ -4,6 +4,14 @@ Async FastAPI backend for a company-website chatbot. One endpoint drives every t
 
 ---
 
+## 🔗 Live Demo & API
+🌐 Live Backend: https://weboum-enquiry-chatbot-3cwx.onrender.com/
+📚 API Documentation (Swagger): https://weboum-enquiry-chatbot-3cwx.onrender.com/docs
+❤️ Health Check: https://weboum-enquiry-chatbot-3cwx.onrender.com/health
+💬 Chat API: POST https://weboum-enquiry-chatbot-3cwx.onrender.com/api/chat
+⚡ Streaming Chat API: POST https://weboum-enquiry-chatbot-3cwx.onrender.com/api/chat?stream=true
+
+
 ## Agent working memory
 
 Read this section before opening the rest of the repo. It is the map of behaviour and files.
