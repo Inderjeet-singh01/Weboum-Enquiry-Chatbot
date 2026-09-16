@@ -113,7 +113,7 @@ STEP_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "current_technology_stack": {
         "question": "What is your Current Technology Stack?",
-        "supporting": "e.g. WhatsApp, Salesforce, Excel, Custom POS",
+        "supporting": "e.g. PHP, Python, React, Next, Node",
         "type": ResponseType.text,
         "options": [],
     },

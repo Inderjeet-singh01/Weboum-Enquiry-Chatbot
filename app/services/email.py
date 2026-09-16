@@ -47,7 +47,7 @@ async def send_enquiry_email(mapped: dict[str, list[dict[str, str]]]) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(BREVO_SMTP_URL, json=payload, headers=headers)
         if response.status_code >= 400:
-            logger.error("Brevo email send failed | status=%s", response.status_code)
+            logger.error("Brevo email send failed | status=%s body=%s", response.status_code, response.text)
             raise EmailSendError("Enquiry email could not be sent")
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.info("Brevo email send completed | duration_ms=%.2f", duration_ms)
