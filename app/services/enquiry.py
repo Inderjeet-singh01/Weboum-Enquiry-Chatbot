@@ -154,7 +154,21 @@ class Session:
     history: list[dict[str, str]] = field(default_factory=list)
 
 
+def has_active_enquiry(session: Session) -> bool:
+    """Return True if session has an active, unfinished enquiry."""
+    return (
+        not session.completed
+        and session.current_step is not None
+        and session.current_step in ENQUIRY_FIELD_ORDER
+    )
+
+
 def start_enquiry(session: Session) -> ChatResponse:
+    if has_active_enquiry(session):
+        logger.info("Resuming active enquiry | step=%s", session.current_step)
+        session.mode = ConversationMode.enquiry.value
+        return step_response(session.current_step)
+
     logger.info("Enquiry flow started")
     session.mode = ConversationMode.enquiry.value
     session.completed = False

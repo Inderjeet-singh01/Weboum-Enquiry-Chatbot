@@ -114,7 +114,14 @@ async function sendMessage(text) {
   let cursorSpan = null;
   let accumulatedText = '';
 
-  const isGeneralQuery = (currentMode === 'general' && text !== 'Anything Else?' && text !== 'Enquire Now');
+  const isGeneralQuery = (
+    currentMode === 'general' &&
+    text !== 'Anything Else?' &&
+    text !== 'Enquire Now' &&
+    text !== 'Business Solutions Enquiry' &&
+    text !== 'Business Enquiry' &&
+    text !== 'Website / General Question'
+  );
 
   // 1. Show the AI message container immediately for general questions
   if (isGeneralQuery) {
@@ -332,7 +339,7 @@ function updateInputPlaceholder(type, step) {
     messageInput.placeholder = 'e.g. WhatsApp, Salesforce, Excel, Python...';
   } else if (type === 'options') {
     if (currentMode === 'initial') {
-      messageInput.placeholder = 'Choose "Business Enquiry" or "Website / General Question" above...';
+      messageInput.placeholder = 'Choose "Website / General Question" or "Business Solutions Enquiry" above...';
     } else {
       messageInput.placeholder = 'Click an option above or type your reply...';
     }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+import re
 import time
 from typing import Any
 import uuid
@@ -14,26 +15,36 @@ from groq import AsyncGroq
 
 from app.core.config import settings
 from app.prompts.general import GENERAL_SYSTEM_PROMPT
-from app.schemas.chat import ChatResponse, ConversationMode, ResponseType
+from app.schemas.chat import (
+    ChatResponse,
+    ConversationMode,
+    ResponseType,
+    validate_work_email,
+)
 from app.services import rag
 from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError, send_enquiry_email
 from app.services.enquiry import (
+    ENQUIRY_FIELD_ORDER,
+    STEP_DEFINITIONS,
     Session,
     build_enquiry_object,
+    has_active_enquiry,
     map_enquiry_data,
     process_enquiry_answer,
     start_enquiry,
+    step_response,
 )
 
 logger = logging.getLogger(__name__)
 
 BUSINESS_ENQUIRY = "Business Enquiry"
+BUSINESS_SOLUTIONS_ENQUIRY = "Business Solutions Enquiry"
 WEBSITE_GENERAL = "Website / General Question"
 ANYTHING_ELSE = "Anything Else?"
 ENQUIRE_NOW = "Enquire Now"
 
 INITIAL_MESSAGE = "Hi! How can I help you today?"
-INITIAL_SUGGESTIONS = [BUSINESS_ENQUIRY, WEBSITE_GENERAL]
+INITIAL_SUGGESTIONS = [WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY]
 GENERAL_FOLLOW_UP = [ANYTHING_ELSE, ENQUIRE_NOW]
 
 GENERAL_INTRO_MESSAGE = "Sure! What would you like to know about us?"
@@ -91,6 +102,90 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
         return response
 
 
+def is_general_question_intent(message: str, current_step: str | None = None) -> bool:
+    """Determine if a user message during enquiry is a general question / information request.
+
+    Distinguishes:
+    A. Predefined navigation actions or valid enquiry answers -> False
+    B. General question / informational request -> True
+    C. Invalid answer to current enquiry field -> False (handled by existing validation)
+    """
+    if not message or not message.strip():
+        return False
+
+    msg = message.strip()
+    lower_msg = msg.lower()
+
+    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, WEBSITE_GENERAL, ANYTHING_ELSE, ENQUIRE_NOW):
+        return False
+
+    # Predefined options step: if message matches one of the options, it is an enquiry answer
+    if current_step and current_step in STEP_DEFINITIONS:
+        step_def = STEP_DEFINITIONS[current_step]
+        if step_def.get("type") == ResponseType.options:
+            if msg in step_def.get("options", []):
+                return False
+
+    # Email step: if message validates as work email, it is an enquiry answer
+    if current_step == "work_email":
+        try:
+            validate_work_email(msg)
+            return False
+        except ValueError:
+            pass
+
+    # Phone step: if message is phone digits (+, -, spaces, digits >= 7) without '?'
+    if current_step == "phone_number":
+        cleaned = re.sub(r"[\s\+\-\(\)\.]", "", msg)
+        if cleaned.isdigit() and len(cleaned) >= 7 and "?" not in msg:
+            return False
+
+    # 1. Question mark is a primary indicator
+    if "?" in msg:
+        return True
+
+    # 2. Starts with standard English interrogative words
+    question_starters = {
+        "what", "what's", "whats", "which", "who", "who's", "whom", "whose",
+        "why", "why's", "where", "where's", "when", "when's", "how", "how's",
+    }
+    words = re.findall(r"[a-zA-Z']+", lower_msg)
+    if words and words[0] in question_starters:
+        return True
+
+    # 3. Starts with auxiliary / modal verb question phrases
+    aux_starters = {
+        ("can", "you"), ("can", "i"), ("can", "we"),
+        ("could", "you"), ("could", "i"), ("could", "we"),
+        ("would", "you"), ("will", "you"),
+        ("do", "you"), ("does", "weboum"), ("does", "it"),
+        ("is", "there"), ("is", "it"), ("is", "weboum"),
+        ("are", "there"), ("are", "you"),
+        ("may", "i"), ("should", "i"),
+    }
+    if len(words) >= 2 and (words[0], words[1]) in aux_starters:
+        return True
+
+    # 4. Imperative / request starters
+    req_phrases = (
+        "tell me", "explain", "describe", "show me", "give me",
+        "i want to know", "i would like to know", "i'd like to know",
+        "i wanna know", "help me understand", "can you tell", "please tell",
+    )
+    if any(lower_msg.startswith(p) for p in req_phrases):
+        return True
+
+    # 5. Queries specifically mentioning Weboum or company services/pricing
+    if "weboum" in lower_msg:
+        return True
+
+    inquiry_keywords = {"services", "pricing", "cost", "portfolio", "offerings", "features"}
+    if any(kw in words for kw in inquiry_keywords):
+        return True
+
+    return False
+
+
 def is_general_question(session_id: str | None, message: str) -> bool:
     """Return True if the message will trigger a Groq LLM completion."""
     if not session_id or not message or not message.strip():
@@ -98,11 +193,14 @@ def is_general_question(session_id: str | None, message: str) -> bool:
     session = _sessions.get(session_id.strip())
     if session is None:
         return False
-    if session.mode != ConversationMode.general.value:
+    msg = message.strip()
+    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, ANYTHING_ELSE, ENQUIRE_NOW, WEBSITE_GENERAL):
         return False
-    if message.strip() in (ANYTHING_ELSE, ENQUIRE_NOW):
-        return False
-    return True
+    if session.mode == ConversationMode.general.value:
+        return True
+    if session.mode == ConversationMode.enquiry.value and not session.completed:
+        return is_general_question_intent(msg, session.current_step)
+    return False
 
 
 async def stream_chat(
@@ -134,7 +232,7 @@ async def stream_chat(
             }
             return
 
-        if session.mode != ConversationMode.general.value or message.strip() in (ANYTHING_ELSE, ENQUIRE_NOW):
+        if not is_general_question(session_id, message):
             resp = await _handle_locked(session_id, message)
             yield {"type": "chunk", "content": resp.message}
             yield {
@@ -148,10 +246,16 @@ async def stream_chat(
             }
             return
 
+        session.mode = ConversationMode.general.value
         logger.info("Chat routed | mode=%s", session.mode)
         _require_message(message)
         logger.info("General question started")
         full_answer_parts: list[str] = []
+        follow_ups = (
+            [WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY]
+            if has_active_enquiry(session)
+            else list(GENERAL_FOLLOW_UP)
+        )
         try:
             context = await _build_rag_context(message, session.history)
             async for chunk in stream_general_answer(message, context, session.history):
@@ -173,7 +277,7 @@ async def stream_chat(
                 "type": "done",
                 "session_id": session_id,
                 "message": full_answer,
-                "suggestions": list(GENERAL_FOLLOW_UP),
+                "suggestions": follow_ups,
                 "mode": ConversationMode.general.value,
             }
         except Exception:
@@ -183,7 +287,7 @@ async def stream_chat(
                 "type": "done",
                 "session_id": session_id,
                 "message": LLM_FALLBACK_MESSAGE,
-                "suggestions": list(GENERAL_FOLLOW_UP),
+                "suggestions": follow_ups,
                 "mode": ConversationMode.general.value,
             }
 
@@ -347,7 +451,7 @@ def _initial_response() -> ChatResponse:
 
 
 def _handle_initial(session: Session, message: str) -> ChatResponse:
-    if message == BUSINESS_ENQUIRY:
+    if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
         return start_enquiry(session)
 
     if message == WEBSITE_GENERAL:
@@ -382,6 +486,28 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
             return _email_failure_response()
         return process_enquiry_answer(session, message)
 
+    # User explicitly clicks Business Solutions Enquiry (or Business Enquiry) during active enquiry
+    if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
+        if session.current_step:
+            return step_response(session.current_step)
+        return start_enquiry(session)
+
+    # User explicitly switches to General Question mode during active enquiry
+    if message == WEBSITE_GENERAL:
+        session.mode = ConversationMode.general.value
+        return ChatResponse(
+            message=GENERAL_INTRO_MESSAGE,
+            type=ResponseType.text,
+            suggestions=[WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY],
+            mode=ConversationMode.general,
+            step=None,
+            completed=False,
+        )
+
+    # Check if message is a general question / information request
+    if is_general_question_intent(message, session.current_step):
+        return await _answer_general_during_enquiry(session, message)
+
     already_complete = session.completed
     response = process_enquiry_answer(session, message)
     if response.completed and not already_complete:
@@ -395,6 +521,39 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
             session.email_sent = False
             return _email_failure_response()
     return response
+
+
+async def _answer_general_during_enquiry(session: Session, message: str) -> ChatResponse:
+    logger.info("General question received during active enquiry | step=%s", session.current_step)
+    session.mode = ConversationMode.general.value
+    # Note: session.current_step, session.data, and session.completed remain preserved!
+    try:
+        context = await _build_rag_context(message, session.history)
+        answer = await generate_general_answer(message, context, session.history)
+        session.history.append({"role": "user", "content": message})
+        session.history.append({"role": "assistant", "content": answer})
+        max_history = settings.MAX_SESSION_HISTORY_MESSAGES
+        if max_history > 0 and len(session.history) > max_history:
+            session.history = session.history[-max_history:]
+    except Exception:
+        logger.exception("Chat processing failed during enquiry interruption")
+        return ChatResponse(
+            message=LLM_FALLBACK_MESSAGE,
+            type=ResponseType.text,
+            suggestions=[WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY],
+            mode=ConversationMode.general,
+            step=None,
+            completed=False,
+        )
+
+    return ChatResponse(
+        message=answer,
+        type=ResponseType.text,
+        suggestions=[WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY],
+        mode=ConversationMode.general,
+        step=None,
+        completed=False,
+    )
 
 
 def _email_failure_response() -> ChatResponse:
@@ -424,20 +583,36 @@ def _switch_to_general(session: Session) -> ChatResponse:
 async def _handle_general(session: Session, message: str) -> ChatResponse:
     _require_message(message)
 
+    has_active = has_active_enquiry(session)
+
+    if has_active and message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, ENQUIRE_NOW):
+        return start_enquiry(session)
+
+    if not has_active and message in (BUSINESS_SOLUTIONS_ENQUIRY, ENQUIRE_NOW):
+        return start_enquiry(session)
+
     if message == ANYTHING_ELSE:
         return ChatResponse(
             message=ANYTHING_ELSE_MESSAGE,
             type=ResponseType.text,
-            suggestions=[],
+            suggestions=[WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY] if has_active else [],
             mode=ConversationMode.general,
             step=None,
             completed=False,
         )
 
-    if message == ENQUIRE_NOW:
-        return start_enquiry(session)
+    if message == WEBSITE_GENERAL:
+        return ChatResponse(
+            message=GENERAL_INTRO_MESSAGE,
+            type=ResponseType.text,
+            suggestions=[WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY] if has_active else [],
+            mode=ConversationMode.general,
+            step=None,
+            completed=False,
+        )
 
     logger.info("General question started")
+    follow_ups = [WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY] if has_active else list(GENERAL_FOLLOW_UP)
     try:
         context = await _build_rag_context(message, session.history)
         answer = await generate_general_answer(message, context, session.history)
@@ -451,7 +626,7 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
         return ChatResponse(
             message=LLM_FALLBACK_MESSAGE,
             type=ResponseType.text,
-            suggestions=list(GENERAL_FOLLOW_UP),
+            suggestions=follow_ups,
             mode=ConversationMode.general,
             step=None,
             completed=False,
@@ -460,7 +635,7 @@ async def _handle_general(session: Session, message: str) -> ChatResponse:
     return ChatResponse(
         message=answer,
         type=ResponseType.text,
-        suggestions=list(GENERAL_FOLLOW_UP),
+        suggestions=follow_ups,
         mode=ConversationMode.general,
         step=None,
         completed=False,
