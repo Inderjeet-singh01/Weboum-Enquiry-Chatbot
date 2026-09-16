@@ -34,7 +34,7 @@ async def test_stream_chat_general_question(mock_stream_llm):
 
     done_event = [e for e in events if e["type"] == "done"][0]
     assert done_event["mode"] == "general"
-    assert done_event["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
 
     session = chatbot._sessions[session_id]
     assert len(session.history) == 2
@@ -100,3 +100,47 @@ def test_api_chat_returns_json_when_no_streaming_requested(client, mock_llm):
     data = response.json()
     assert data["mode"] == "general"
     assert "AI/ML development" in data["message"]
+
+
+@pytest.mark.anyio
+async def test_stream_chat_interruption_during_enquiry_resets_state_and_restarts_at_step_1(mock_stream_llm):
+    chatbot.reset_runtime_state()
+    session_id = "test-stream-interrupt"
+    await chatbot.handle_chat(session_id, "")
+    # Start enquiry
+    r1 = await chatbot.handle_chat(session_id, "Business Solutions Enquiry")
+    assert r1.mode.value == "enquiry"
+    assert r1.step == "biggest_operational_challenge"
+
+    # User answers step 1
+    r2 = await chatbot.handle_chat(session_id, "High customer support call/chat volume & slow response time")
+    assert r2.step == "ai_capability"
+    assert chatbot._sessions[session_id].data["biggest_operational_challenge"] is not None
+
+    # User interrupts by streaming a general question
+    events = []
+    async for event in chatbot.stream_chat(session_id, "What AI services does Weboum provide?"):
+        events.append(event)
+
+    types = [e["type"] for e in events]
+    assert "chunk" in types
+    assert "done" in types
+
+    done_event = [e for e in events if e["type"] == "done"][0]
+    assert done_event["mode"] == "general"
+    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+    # Verify enquiry state was invalidated
+    session = chatbot._sessions[session_id]
+    assert session.current_step is None
+    assert session.data["biggest_operational_challenge"] is None
+    assert session.completed is False
+
+    # User restarts Business Solutions Enquiry
+    events_enq = []
+    async for event in chatbot.stream_chat(session_id, "Business Solutions Enquiry"):
+        events_enq.append(event)
+
+    done_enq = [e for e in events_enq if e["type"] == "done"][0]
+    assert done_enq["mode"] == "enquiry"
+    assert done_enq["step"] == "biggest_operational_challenge"

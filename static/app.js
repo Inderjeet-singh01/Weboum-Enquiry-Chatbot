@@ -233,7 +233,7 @@ async function sendMessage(text) {
             updateEnquiryTracker();
             updateInputPlaceholder('text', currentStep);
 
-            const suggestions = event.suggestions || ['Anything Else?', 'Enquire Now'];
+            const suggestions = event.suggestions || ['Website / General Question', 'Business Solutions Enquiry'];
             if (suggestions.length > 0 && activeBotGroup) {
               const wrapper = activeBotGroup.querySelector('.msg-content-wrapper');
               const timestampEl = activeBotGroup.querySelector('.msg-timestamp');
@@ -266,7 +266,7 @@ async function sendMessage(text) {
       const timestampEl = activeBotGroup.querySelector('.msg-timestamp');
       const suggestionsEl = document.createElement('div');
       suggestionsEl.className = 'suggestions-container';
-      suggestionsEl.innerHTML = ['Anything Else?', 'Enquire Now'].map(s =>
+      suggestionsEl.innerHTML = ['Website / General Question', 'Business Solutions Enquiry'].map(s =>
         `<button class="chip-btn" onclick="selectChip('${escapeHtml(s)}')">${escapeHtml(s)}</button>`
       ).join('');
       wrapper.insertBefore(suggestionsEl, timestampEl);

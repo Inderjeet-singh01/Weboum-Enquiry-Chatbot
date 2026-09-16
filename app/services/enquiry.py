@@ -155,7 +155,7 @@ class Session:
 
 
 def has_active_enquiry(session: Session) -> bool:
-    """Return True if session has an active, unfinished enquiry."""
+    """Return True if session currently has an active, unfinished enquiry."""
     return (
         not session.completed
         and session.current_step is not None
@@ -163,12 +163,15 @@ def has_active_enquiry(session: Session) -> bool:
     )
 
 
-def start_enquiry(session: Session) -> ChatResponse:
-    if has_active_enquiry(session):
-        logger.info("Resuming active enquiry | step=%s", session.current_step)
-        session.mode = ConversationMode.enquiry.value
-        return step_response(session.current_step)
+def reset_enquiry_state(session: Session) -> None:
+    """Clear all enquiry data and current step pointer without modifying conversation history."""
+    session.data = empty_enquiry_data()
+    session.current_step = None
+    session.completed = False
+    session.email_sent = False
 
+
+def start_enquiry(session: Session) -> ChatResponse:
     logger.info("Enquiry flow started")
     session.mode = ConversationMode.enquiry.value
     session.completed = False

@@ -234,7 +234,7 @@ def test_general_mode_answers_website_questions(client, mock_llm):
     assert answer["mode"] == "general"
     assert answer["type"] == "text"
     assert "AI/ML development" in answer["message"]
-    assert answer["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert answer["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
     assert answer["step"] is None
     assert answer["completed"] is False
 
@@ -243,7 +243,7 @@ def test_general_answer_returns_exactly_two_follow_up_options(client, mock_llm):
     start_session(client, "gen-2")
     send(client, "gen-2", "Website / General Question")
     data = send(client, "gen-2", "What industries do you serve?").json()
-    assert data["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert data["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
     assert len(data["suggestions"]) == 2
 
 
@@ -259,7 +259,7 @@ def test_anything_else_keeps_user_in_general_mode(client, mock_llm):
 
     again = send(client, "gen-3", "What industries do you work with?").json()
     assert again["mode"] == "general"
-    assert again["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert again["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
 
 
 def test_enquire_now_switches_same_session_into_enquiry_mode(client, mock_llm):
@@ -281,7 +281,7 @@ def test_general_question_does_not_enter_enquiry_mode(client, mock_llm):
     send(client, "stay-general", "Website / General Question")
     data = send(client, "stay-general", "Business Enquiry").json()
     assert data["mode"] == "general"
-    assert data["suggestions"] == ["Anything Else?", "Enquire Now"]
+    assert data["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
     assert chatbot._sessions["stay-general"].mode == "general"
 
 
@@ -483,8 +483,8 @@ def test_business_solutions_enquiry_starts_from_first_step(client):
     assert data["message"].startswith("What is your biggest operational challenge right now?")
 
 
-def test_general_question_during_enquiry_does_not_advance_or_alter_data(client, mock_llm):
-    """Verify asking a general question during active enquiry answers via RAG and preserves state."""
+def test_general_question_during_enquiry_invalidates_unfinished_state_and_answers_via_rag(client, mock_llm):
+    """Verify asking a general question during active enquiry answers via RAG and invalidates unfinished state."""
     session_id = "interrupt-1"
     start_session(client, session_id)
     send(client, session_id, "Business Solutions Enquiry")
@@ -507,19 +507,27 @@ def test_general_question_during_enquiry_does_not_advance_or_alter_data(client, 
     assert "AI/ML development" in gen_resp["message"]
     assert gen_resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
 
-    # Verify session state is completely preserved
+    # Verify unfinished enquiry state is completely invalidated
     session = chatbot._sessions[session_id]
-    assert session.current_step == "business_size"
-    assert session.data["biggest_operational_challenge"] == CHALLENGE
-    assert session.data["ai_capability"] == AI_CAPABILITY
-    assert session.data["primary_industry"] == INDUSTRY
-    assert session.data["business_size"] is None
+    assert session.current_step is None
+    assert session.data["biggest_operational_challenge"] is None
+    assert session.data["ai_capability"] is None
+    assert session.data["primary_industry"] is None
     assert session.completed is False
+    # History for RAG context is preserved
+    assert len(session.history) == 2
+
+    # User now selects Business Solutions Enquiry -> MUST start fresh from Step 1
+    new_enq = send(client, session_id, "Business Solutions Enquiry").json()
+    assert new_enq["mode"] == "enquiry"
+    assert new_enq["step"] == "biggest_operational_challenge"
+    assert new_enq["suggestions"] == STEP_DEFINITIONS["biggest_operational_challenge"]["options"]
+    assert session.data["biggest_operational_challenge"] is None
 
 
-def test_business_solutions_enquiry_resumes_saved_step(client, mock_llm):
-    """Verify selecting Business Solutions Enquiry resumes from saved current_step."""
-    session_id = "resume-1"
+def test_business_solutions_enquiry_starts_from_step_1_without_resume(client, mock_llm):
+    """Verify selecting Business Solutions Enquiry always starts at Step 1, never resuming."""
+    session_id = "no-resume-1"
     start_session(client, session_id)
     send(client, session_id, "Business Solutions Enquiry")
     send(client, session_id, CHALLENGE)
@@ -529,21 +537,21 @@ def test_business_solutions_enquiry_resumes_saved_step(client, mock_llm):
     # Interrupt with general question
     send(client, session_id, "What kind of AI solutions does Weboum provide for real estate?")
 
-    # Resume by clicking Business Solutions Enquiry
-    resume_resp = send(client, session_id, "Business Solutions Enquiry").json()
-    assert resume_resp["mode"] == "enquiry"
-    assert resume_resp["step"] == "business_size"
-    assert resume_resp["suggestions"] == STEP_DEFINITIONS["business_size"]["options"]
-    assert "What size is your business?" in resume_resp["message"]
+    # Click Business Solutions Enquiry -> must NOT resume Step 4 (business_size)
+    restart_resp = send(client, session_id, "Business Solutions Enquiry").json()
+    assert restart_resp["mode"] == "enquiry"
+    assert restart_resp["step"] == "biggest_operational_challenge"
+    assert restart_resp["suggestions"] == STEP_DEFINITIONS["biggest_operational_challenge"]["options"]
+    assert "What is your biggest operational challenge right now?" in restart_resp["message"]
 
-    # Continue enquiry from resumed step
-    next_resp = send(client, session_id, SIZE).json()
-    assert next_resp["step"] == "full_name"
-    assert chatbot._sessions[session_id].data["business_size"] == SIZE
+    # Continue fresh enquiry from Step 1
+    next_resp = send(client, session_id, CHALLENGE).json()
+    assert next_resp["step"] == "ai_capability"
+    assert chatbot._sessions[session_id].data["biggest_operational_challenge"] == CHALLENGE
 
 
-def test_text_entry_interrupted_by_general_question(client, mock_llm):
-    """Verify general question at text entry step is not treated as the answer."""
+def test_text_entry_interrupted_by_general_question_starts_at_step_1(client, mock_llm):
+    """Verify general question at text entry step is not treated as answer and enquiry restarts at Step 1."""
     session_id = "text-interrupt"
     start_session(client, session_id)
     send(client, session_id, "Business Solutions Enquiry")
@@ -561,22 +569,19 @@ def test_text_entry_interrupted_by_general_question(client, mock_llm):
     assert gen_resp["mode"] == "general"
     assert gen_resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
 
-    # Verify company_name was NOT set to the question text
+    # Verify company_name was NOT set to the question text and state was cleared
     session = chatbot._sessions[session_id]
     assert session.data["company_name"] is None
-    assert session.current_step == "company_name"
+    assert session.current_step is None
 
-    # User resumes enquiry and answers with real company name
-    resume_resp = send(client, session_id, "Business Solutions Enquiry").json()
-    assert resume_resp["step"] == "company_name"
-
-    answer_resp = send(client, session_id, "ABC Technologies").json()
-    assert answer_resp["step"] == "work_email"
-    assert chatbot._sessions[session_id].data["company_name"] == "ABC Technologies"
+    # User restarts enquiry -> starts from Step 1
+    restart_resp = send(client, session_id, "Business Solutions Enquiry").json()
+    assert restart_resp["step"] == "biggest_operational_challenge"
+    assert restart_resp["mode"] == "enquiry"
 
 
 def test_multiple_consecutive_general_questions_during_active_enquiry(client, mock_llm):
-    """Verify user can ask multiple general questions in a row without losing enquiry state."""
+    """Verify user can ask multiple general questions and next enquiry starts fresh at Step 1."""
     session_id = "multi-q"
     start_session(client, session_id)
     send(client, session_id, "Business Solutions Enquiry")
@@ -587,25 +592,53 @@ def test_multiple_consecutive_general_questions_during_active_enquiry(client, mo
     q1 = send(client, session_id, "What does Weboum do?").json()
     assert q1["mode"] == "general"
     assert q1["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
-    assert chatbot._sessions[session_id].current_step == "biggest_operational_challenge"
+    assert chatbot._sessions[session_id].current_step is None
 
     # Question 2
     q2 = send(client, session_id, "Where is your office located?").json()
     assert q2["mode"] == "general"
     assert q2["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
-    assert chatbot._sessions[session_id].current_step == "biggest_operational_challenge"
+    assert chatbot._sessions[session_id].current_step is None
 
     # Question 3 (imperative without question mark)
     q3 = send(client, session_id, "Tell me about your healthcare AI solutions").json()
     assert q3["mode"] == "general"
     assert q3["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
-    assert chatbot._sessions[session_id].current_step == "biggest_operational_challenge"
+    assert chatbot._sessions[session_id].current_step is None
 
-    # Resume enquiry
+    # History preserves conversation
+    assert len(chatbot._sessions[session_id].history) == 6
+
+    # Start enquiry again -> Step 1
     res = send(client, session_id, "Business Solutions Enquiry").json()
     assert res["mode"] == "enquiry"
     assert res["step"] == "biggest_operational_challenge"
     assert res["suggestions"] == STEP_DEFINITIONS["biggest_operational_challenge"]["options"]
+
+
+def test_website_general_selection_during_active_enquiry(client):
+    """Verify user can explicitly select Website / General Question to abandon enquiry and restart at Step 1."""
+    session_id = "gen-switch"
+    start_session(client, session_id)
+    send(client, session_id, "Business Solutions Enquiry")
+    send(client, session_id, CHALLENGE)
+
+    assert chatbot._sessions[session_id].current_step == "ai_capability"
+
+    # User clicks Website / General Question
+    resp = send(client, session_id, "Website / General Question").json()
+    assert resp["mode"] == "general"
+    assert resp["step"] is None
+    assert resp["suggestions"] == []
+
+    # State is cleared
+    assert chatbot._sessions[session_id].current_step is None
+    assert chatbot._sessions[session_id].data["biggest_operational_challenge"] is None
+
+    # Start enquiry again -> Starts fresh from Step 1
+    resumed = send(client, session_id, "Business Solutions Enquiry").json()
+    assert resumed["mode"] == "enquiry"
+    assert resumed["step"] == "biggest_operational_challenge"
 
 
 def test_invalid_answers_during_enquiry_retain_validation(client):
@@ -673,28 +706,237 @@ def test_completed_enquiry_does_not_reuse_stale_data(client):
     assert chatbot._sessions[session_id].data["biggest_operational_challenge"] is None
 
 
-def test_website_general_selection_during_active_enquiry(client):
-    """Verify user can explicitly select Website / General Question without destroying active enquiry."""
-    session_id = "gen-switch"
+def test_manual_test_matrix_scenario_a(client, mock_llm):
+    """TEST A: Initial -> Business Solutions Enquiry -> Step 1 -> general question -> general answer -> Business Solutions Enquiry -> Step 1."""
+    session_id = "matrix-a"
+    init = start_session(client, session_id)
+    assert init["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+    enq = send(client, session_id, "Business Solutions Enquiry").json()
+    assert enq["step"] == "biggest_operational_challenge"
+
+    gen = send(client, session_id, "What services does Weboum provide?").json()
+    assert gen["mode"] == "general"
+    assert gen["step"] is None
+    assert gen["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+    enq2 = send(client, session_id, "Business Solutions Enquiry").json()
+    assert enq2["mode"] == "enquiry"
+    assert enq2["step"] == "biggest_operational_challenge"
+
+
+def test_manual_test_matrix_scenario_b(client, mock_llm):
+    """TEST B: Initial -> General Question -> general answer -> Business Solutions Enquiry -> Step 1."""
+    session_id = "matrix-b"
+    start_session(client, session_id)
+
+    intro = send(client, session_id, "Website / General Question").json()
+    assert intro["mode"] == "general"
+
+    gen = send(client, session_id, "What services does Weboum provide?").json()
+    assert gen["mode"] == "general"
+    assert gen["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+    enq = send(client, session_id, "Business Solutions Enquiry").json()
+    assert enq["mode"] == "enquiry"
+    assert enq["step"] == "biggest_operational_challenge"
+
+
+def test_manual_test_matrix_scenario_c(client, mock_llm):
+    """TEST C: Enquiry Step 1 -> valid answer -> Step 2 -> general question -> general answer -> Business Solutions Enquiry -> Step 1."""
+    session_id = "matrix-c"
+    start_session(client, session_id)
+    send(client, session_id, "Business Solutions Enquiry")
+
+    step2 = send(client, session_id, CHALLENGE).json()
+    assert step2["step"] == "ai_capability"
+
+    gen = send(client, session_id, "What AI services does Weboum provide?").json()
+    assert gen["mode"] == "general"
+    assert gen["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+    restart = send(client, session_id, "Business Solutions Enquiry").json()
+    assert restart["mode"] == "enquiry"
+    assert restart["step"] == "biggest_operational_challenge"
+
+
+def test_manual_test_matrix_scenario_d(client, mock_llm):
+    """TEST D: Enquiry Step 1 -> valid answer -> Step 2 -> general question -> another general question -> another general question -> Business Solutions Enquiry -> Step 1."""
+    session_id = "matrix-d"
     start_session(client, session_id)
     send(client, session_id, "Business Solutions Enquiry")
     send(client, session_id, CHALLENGE)
 
-    assert chatbot._sessions[session_id].current_step == "ai_capability"
+    q1 = send(client, session_id, "What AI services does Weboum provide?").json()
+    assert q1["mode"] == "general"
 
-    # User clicks Website / General Question
-    resp = send(client, session_id, "Website / General Question").json()
+    q2 = send(client, session_id, "Who is the CEO of Weboum?").json()
+    assert q2["mode"] == "general"
+
+    q3 = send(client, session_id, "What technologies do you use?").json()
+    assert q3["mode"] == "general"
+
+    restart = send(client, session_id, "Business Solutions Enquiry").json()
+    assert restart["mode"] == "enquiry"
+    assert restart["step"] == "biggest_operational_challenge"
+
+
+def test_manual_test_matrix_scenario_e_repeated_switching(client, mock_llm):
+    """TEST E: Repeated switching General -> Enquiry -> General -> Enquiry -> General -> Enquiry."""
+    session_id = "matrix-e"
+    start_session(client, session_id)
+
+    for cycle in range(4):
+        # General question
+        gen = send(client, session_id, f"What services do you offer? Cycle {cycle}").json()
+        assert gen["mode"] == "general"
+        assert gen["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+        # Switch to Enquiry -> must start at Step 1
+        enq = send(client, session_id, "Business Solutions Enquiry").json()
+        assert enq["mode"] == "enquiry"
+        assert enq["step"] == "biggest_operational_challenge"
+
+        # Advance to Step 2
+        step2 = send(client, session_id, CHALLENGE).json()
+        assert step2["step"] == "ai_capability"
+
+
+def test_ambiguous_answers_distinction(client, mock_llm):
+    """Verify company name and tech stack answers are not misclassified as general questions."""
+    session_id = "ambiguous-answers"
+    start_session(client, session_id)
+    send(client, session_id, "Business Solutions Enquiry")
+    send(client, session_id, CHALLENGE)
+    send(client, session_id, AI_CAPABILITY)
+    send(client, session_id, INDUSTRY)
+    send(client, session_id, SIZE)
+    send(client, session_id, "Jane Doe")
+
+    # Step 6: company_name answer "ABC Technologies"
+    co_resp = send(client, session_id, "ABC Technologies").json()
+    assert co_resp["mode"] == "enquiry"
+    assert co_resp["step"] == "work_email"
+    assert chatbot._sessions[session_id].data["company_name"] == "ABC Technologies"
+
+    # Valid email & phone
+    send(client, session_id, "jane@abc.com")
+    send(client, session_id, "+1 555-123-4567")
+
+    # Step 9: tech stack answer "Python React Node"
+    tech_resp = send(client, session_id, "Python React Node").json()
+    assert tech_resp["mode"] == "enquiry"
+    assert tech_resp["completed"] is True
+    assert chatbot._sessions[session_id].data["current_technology_stack"] == "Python React Node"
+
+
+def test_prompt_general_question_examples_during_enquiry(client, mock_llm):
+    """Verify all examples from user prompt are classified as general questions during enquiry."""
+    examples = [
+        "What services does Weboum provide?",
+        "What AI solutions do you offer?",
+        "Who is the CEO of Weboum?",
+        "What technologies do you use?",
+        "Tell me about your company.",
+        "How much do your services cost?",
+        "What industries do you work with?",
+        "Can you explain your AI automation services?",
+        "What is your portfolio?",
+        "Can you tell me about Weboum?",
+        "services",
+        "pricing",
+        "portfolio",
+    ]
+
+    for i, ex in enumerate(examples):
+        sid = f"prompt-ex-{i}"
+        start_session(client, sid)
+        send(client, sid, "Business Solutions Enquiry")
+        # Now at Step 1 (biggest_operational_challenge)
+        resp = send(client, sid, ex).json()
+        assert resp["mode"] == "general", f"Expected general mode for: {ex}"
+        assert resp["step"] is None
+        assert resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+        # Invariant: session.current_step is None and data is empty
+        assert chatbot._sessions[sid].current_step is None
+        assert all(v is None for v in chatbot._sessions[sid].data.values())
+
+
+def test_tech_stack_step_distinguishes_answer_from_weboum_tech_question(client, mock_llm):
+    """Verify Step 9 distinguishes 'What technologies does Weboum use?' from tech stack answer."""
+    session_id = "step-9-distinction"
+    start_session(client, session_id)
+    send(client, session_id, "Business Solutions Enquiry")
+    send(client, session_id, CHALLENGE)
+    send(client, session_id, AI_CAPABILITY)
+    send(client, session_id, INDUSTRY)
+    send(client, session_id, SIZE)
+    send(client, session_id, "Grace Hopper")
+    send(client, session_id, "Compiler Corp")
+    send(client, session_id, "grace@compiler.com")
+    send(client, session_id, "+1 800-555-0199")
+
+    assert chatbot._sessions[session_id].current_step == "current_technology_stack"
+
+    # User asks about Weboum's tech stack instead of answering
+    resp = send(client, session_id, "What technologies does Weboum use?").json()
     assert resp["mode"] == "general"
-    assert resp["step"] is None
     assert resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
 
-    # State still preserved
-    assert chatbot._sessions[session_id].current_step == "ai_capability"
-    assert chatbot._sessions[session_id].data["biggest_operational_challenge"] == CHALLENGE
+    # Technology stack was NOT filled with the question
+    assert chatbot._sessions[session_id].current_step is None
+    assert chatbot._sessions[session_id].data["current_technology_stack"] is None
+    assert chatbot._sessions[session_id].completed is False
 
-    # Resume enquiry
-    resumed = send(client, session_id, "Business Solutions Enquiry").json()
-    assert resumed["mode"] == "enquiry"
-    assert resumed["step"] == "ai_capability"
+    # Restart enquiry -> starts at Step 1
+    restart = send(client, session_id, "Business Solutions Enquiry").json()
+    assert restart["mode"] == "enquiry"
+    assert restart["step"] == "biggest_operational_challenge"
+    assert all(v is None for v in chatbot._sessions[session_id].data.values())
+
+
+def test_no_data_leakage_after_multiple_restarts(client, mock_llm):
+    """Verify previously entered enquiry data never leaks into subsequent fresh enquiries."""
+    session_id = "leakage-test"
+    start_session(client, session_id)
+    send(client, session_id, "Business Solutions Enquiry")
+    send(client, session_id, CHALLENGE)
+    send(client, session_id, AI_CAPABILITY)
+    send(client, session_id, INDUSTRY)
+    send(client, session_id, SIZE)
+    send(client, session_id, "First User")
+    send(client, session_id, "First Company")
+
+    # Abandon via general question
+    send(client, session_id, "What is Weboum's pricing?")
+
+    # Verify all data was wiped
+    session = chatbot._sessions[session_id]
+    for key in ENQUIRY_FIELD_ORDER:
+        assert session.data[key] is None
+
+    # Restart
+    send(client, session_id, "Business Solutions Enquiry")
+    for key in ENQUIRY_FIELD_ORDER:
+        assert session.data[key] is None
+
+    # Answer Step 1 and Step 2 with new answers
+    send(client, session_id, CHALLENGE)
+    send(client, session_id, AI_CAPABILITY)
+
+    # Abandon via Website / General Question
+    send(client, session_id, "Website / General Question")
+
+    # Verify all data was wiped
+    for key in ENQUIRY_FIELD_ORDER:
+        assert session.data[key] is None
+
+    # Restart again
+    send(client, session_id, "Business Solutions Enquiry")
+    for key in ENQUIRY_FIELD_ORDER:
+        assert session.data[key] is None
+    assert session.current_step == "biggest_operational_challenge"
+
+
 
 
