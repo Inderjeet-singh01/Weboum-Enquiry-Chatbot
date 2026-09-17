@@ -938,5 +938,368 @@ def test_no_data_leakage_after_multiple_restarts(client, mock_llm):
     assert session.current_step == "biggest_operational_challenge"
 
 
+def test_matrix_scenario_6_general_question_at_every_enquiry_field(client, mock_llm):
+    """TEST 6: At EVERY enquiry field (1 to 9), test an interruption by a general question.
+
+    Verifies:
+    1. Interruption routes to general mode without enquiry validation error.
+    2. Answer is returned via RAG/LLM.
+    3. All partial enquiry state (data and current_step) is completely wiped.
+    4. Business Solutions Enquiry restarts fresh at Step 1.
+    """
+    valid_answers = [
+        CHALLENGE,
+        AI_CAPABILITY,
+        INDUSTRY,
+        SIZE,
+        "Ada Lovelace",
+        "Analytical Engines Ltd",
+        "ada@analytical.com",
+        "+44 20 7946 0950",
+        "Python React PostgreSQL",
+    ]
+
+    for step_index, target_field in enumerate(ENQUIRY_FIELD_ORDER):
+        sid = f"field-interrupt-{step_index}"
+        start_session(client, sid)
+        send(client, sid, "Business Solutions Enquiry")
+
+        # Advance up to the target field
+        for i in range(step_index):
+            send(client, sid, valid_answers[i])
+
+        assert chatbot._sessions[sid].current_step == target_field
+
+        # Send general question during this field
+        gen_resp = send(client, sid, "What services does Weboum provide?").json()
+        assert gen_resp["mode"] == "general", f"Field {target_field} did not route to general"
+        assert gen_resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+        assert "AI/ML development" in gen_resp["message"]
+
+        # Verify state is cleared
+        session = chatbot._sessions[sid]
+        assert session.current_step is None
+        assert session.completed is False
+        for key in ENQUIRY_FIELD_ORDER:
+            assert session.data[key] is None
+
+        # Verify restart starts fresh at Step 1
+        restart = send(client, sid, "Business Solutions Enquiry").json()
+        assert restart["mode"] == "enquiry"
+        assert restart["step"] == "biggest_operational_challenge"
+        for key in ENQUIRY_FIELD_ORDER:
+            assert session.data[key] is None
+
+
+def test_matrix_scenario_7_valid_answer_at_every_enquiry_field(client, mock_llm):
+    """TEST 7: At EVERY enquiry field, test one valid enquiry answer advances deterministically."""
+    sid = "full-valid-pipeline"
+    start_session(client, sid)
+    send(client, sid, "Business Solutions Enquiry")
+
+    valid_answers = [
+        (CHALLENGE, "biggest_operational_challenge", "ai_capability"),
+        (AI_CAPABILITY, "ai_capability", "primary_industry"),
+        (INDUSTRY, "primary_industry", "business_size"),
+        (SIZE, "business_size", "full_name"),
+        ("Ada Lovelace", "full_name", "company_name"),
+        ("Analytical Engines Ltd", "company_name", "work_email"),
+        ("ada@analytical.com", "work_email", "phone_number"),
+        ("+44 20 7946 0950", "phone_number", "current_technology_stack"),
+        ("Python React PostgreSQL", "current_technology_stack", None),
+    ]
+
+    for answer, current_f, next_f in valid_answers:
+        resp = send(client, sid, answer).json()
+        assert resp["mode"] == "enquiry"
+        if next_f:
+            assert resp["step"] == next_f
+            assert resp["completed"] is False
+            assert chatbot._sessions[sid].data[current_f] == answer
+        else:
+            assert resp["completed"] is True
+            assert chatbot._sessions[sid].data[current_f] == answer
+
+
+def test_matrix_scenario_8_natural_language_variants(client, mock_llm):
+    """TEST 8: Verify all required natural-language variants from Section 24 of prompt."""
+    variants = [
+        "about the company",
+        "full details about company",
+        "tell me about Weboum",
+        "all projects delivered",
+        "what services do you provide",
+        "tell me everything about your services",
+        "what AI solutions do you offer",
+        "who leads the company",
+        "what technologies do you use",
+        "all the teams",
+        "all team leads",
+        "tell me more about them",
+        "what all services do you have",
+        "give me company information",
+        "everything about Weboum",
+        "company details",
+    ]
+
+    for i, phrase in enumerate(variants):
+        sid = f"nl-variant-{i}"
+        start_session(client, sid)
+        send(client, sid, "Business Solutions Enquiry")
+        assert chatbot._sessions[sid].current_step == "biggest_operational_challenge"
+
+        # Ask natural language variant
+        resp = send(client, sid, phrase).json()
+        assert resp["mode"] == "general", f"Phrase '{phrase}' failed to route to general mode"
+        assert resp["step"] is None
+        assert resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+
+        # Ensure state reset
+        session = chatbot._sessions[sid]
+        assert session.current_step is None
+        for key in ENQUIRY_FIELD_ORDER:
+            assert session.data[key] is None
+
+        # Verify restart goes back to Step 1
+        restart = send(client, sid, "Business Solutions Enquiry").json()
+        assert restart["mode"] == "enquiry"
+        assert restart["step"] == "biggest_operational_challenge"
+
+
+def test_section_14_and_15_field_aware_routing_and_examples(client, mock_llm):
+    """Verify Section 14 and Section 15 requirements:
+
+    1. Option-based field (primary_industry):
+       - Valid option ('Healthcare') -> advances
+       - General questions ('Who is the CEO of Weboum?', 'CEO of company', 'Who runs Weboum?', 'all team leads') -> RAG & enquiry reset
+       - Invalid input ('randomxyz123') -> stays on step with option validation error
+    2. Free-text fields (work_email, phone_number, full_name, company_name, current_technology_stack):
+       - Valid answers -> advance
+       - General questions -> RAG & enquiry reset
+       - Invalid inputs -> stay on same step with validation error
+    3. Natural language & typo variations (Section 15) -> correctly routed to RAG
+    """
+    # -------------------------------------------------------------
+    # 1. Option-based step: primary_industry
+    # -------------------------------------------------------------
+    def advance_to_industry(sid: str):
+        start_session(client, sid)
+        send(client, sid, "Business Solutions Enquiry")
+        send(client, sid, CHALLENGE)
+        send(client, sid, AI_CAPABILITY)
+        assert chatbot._sessions[sid].current_step == "primary_industry"
+
+    # 1a. Valid option advances
+    sid_opt_valid = "ind-valid"
+    advance_to_industry(sid_opt_valid)
+    resp = send(client, sid_opt_valid, "Healthcare").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "business_size"
+    assert chatbot._sessions[sid_opt_valid].data["primary_industry"] == "Healthcare"
+
+    # 1b. General questions on option step -> RAG & reset
+    option_gen_questions = [
+        "Who is the CEO of Weboum?",
+        "CEO of company",
+        "Who runs Weboum?",
+        "all team leads",
+        "company leadership",
+        "ceo company",
+        "who runs the company",
+    ]
+    for i, q in enumerate(option_gen_questions):
+        sid = f"ind-gen-{i}"
+        advance_to_industry(sid)
+        resp = send(client, sid, q).json()
+        assert resp["mode"] == "general", f"Expected general mode for '{q}' on primary_industry"
+        assert resp["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+        assert chatbot._sessions[sid].current_step is None
+        assert all(v is None for v in chatbot._sessions[sid].data.values())
+
+    # 1c. Invalid non-question input on option step -> stays on step
+    sid_opt_invalid = "ind-invalid"
+    advance_to_industry(sid_opt_invalid)
+    resp = send(client, sid_opt_invalid, "randomxyz123").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "primary_industry"
+    assert "Please choose one of the listed options." in resp["message"]
+    assert chatbot._sessions[sid_opt_invalid].current_step == "primary_industry"
+
+    # -------------------------------------------------------------
+    # Helper to advance up to arbitrary step
+    # -------------------------------------------------------------
+    def setup_session_at_step(sid: str, target: str):
+        start_session(client, sid)
+        send(client, sid, "Business Solutions Enquiry")
+        if target == "biggest_operational_challenge":
+            return
+        send(client, sid, CHALLENGE)
+        if target == "ai_capability":
+            return
+        send(client, sid, AI_CAPABILITY)
+        if target == "primary_industry":
+            return
+        send(client, sid, INDUSTRY)
+        if target == "business_size":
+            return
+        send(client, sid, SIZE)
+        if target == "full_name":
+            return
+        send(client, sid, "Inderjeet Singh")
+        if target == "company_name":
+            return
+        send(client, sid, "ABC Technologies")
+        if target == "work_email":
+            return
+        send(client, sid, "user@company.com")
+        if target == "phone_number":
+            return
+        send(client, sid, "9876543210")
+        if target == "current_technology_stack":
+            return
+
+    # -------------------------------------------------------------
+    # 2. Free-text: full_name
+    # -------------------------------------------------------------
+    sid_fn = "fn-test-1"
+    setup_session_at_step(sid_fn, "full_name")
+    resp = send(client, sid_fn, "Inderjeet Singh").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "company_name"
+
+    # full_name general question
+    sid_fn_gen = "fn-test-gen"
+    setup_session_at_step(sid_fn_gen, "full_name")
+    resp = send(client, sid_fn_gen, "Who is the CEO?").json()
+    assert resp["mode"] == "general"
+    assert chatbot._sessions[sid_fn_gen].current_step is None
+
+    # full_name invalid
+    sid_fn_inv = "fn-test-inv"
+    setup_session_at_step(sid_fn_inv, "full_name")
+    resp = send(client, sid_fn_inv, "1").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "full_name"
+    assert "valid full name" in resp["message"]
+
+    # -------------------------------------------------------------
+    # 3. Free-text: company_name
+    # -------------------------------------------------------------
+    sid_cn = "cn-test-1"
+    setup_session_at_step(sid_cn, "company_name")
+    resp = send(client, sid_cn, "ABC Technologies").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "work_email"
+
+    sid_cn_weboum = "cn-test-weboum"
+    setup_session_at_step(sid_cn_weboum, "company_name")
+    resp = send(client, sid_cn_weboum, "Weboum Technology").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "work_email"
+
+    # company_name general questions
+    for q in ["CEO of company", "Who runs Weboum", "tell me about Weboum", "company leadership"]:
+        sid_q = f"cn-gen-{hash(q) % 10000}"
+        setup_session_at_step(sid_q, "company_name")
+        resp = send(client, sid_q, q).json()
+        assert resp["mode"] == "general", f"Expected general mode for '{q}' on company_name"
+        assert chatbot._sessions[sid_q].current_step is None
+
+    # company_name ambiguous "company" stays on step
+    sid_cn_amb = "cn-ambiguous"
+    setup_session_at_step(sid_cn_amb, "company_name")
+    resp = send(client, sid_cn_amb, "company").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "company_name"
+
+    # company_name invalid
+    sid_cn_inv = "cn-invalid"
+    setup_session_at_step(sid_cn_inv, "company_name")
+    resp = send(client, sid_cn_inv, "1").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "company_name"
+    assert "valid company name" in resp["message"]
+
+    # -------------------------------------------------------------
+    # 4. Free-text: work_email
+    # -------------------------------------------------------------
+    sid_em = "em-test-1"
+    setup_session_at_step(sid_em, "work_email")
+    resp = send(client, sid_em, "user@company.com").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "phone_number"
+
+    # work_email general questions
+    sid_em_gen1 = "em-gen-1"
+    setup_session_at_step(sid_em_gen1, "work_email")
+    resp = send(client, sid_em_gen1, "What are your services?").json()
+    assert resp["mode"] == "general"
+    assert chatbot._sessions[sid_em_gen1].current_step is None
+
+    sid_em_gen2 = "em-gen-2"
+    setup_session_at_step(sid_em_gen2, "work_email")
+    resp = send(client, sid_em_gen2, "Who is your CEO?").json()
+    assert resp["mode"] == "general"
+    assert chatbot._sessions[sid_em_gen2].current_step is None
+
+    # work_email invalid email stays on step
+    sid_em_inv = "em-inv-1"
+    setup_session_at_step(sid_em_inv, "work_email")
+    resp = send(client, sid_em_inv, "abc").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "work_email"
+    assert "valid work email" in resp["message"]
+
+    # -------------------------------------------------------------
+    # 5. Free-text: phone_number
+    # -------------------------------------------------------------
+    sid_ph = "ph-test-1"
+    setup_session_at_step(sid_ph, "phone_number")
+    resp = send(client, sid_ph, "9876543210").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "current_technology_stack"
+
+    # phone_number general questions
+    sid_ph_gen = "ph-gen-1"
+    setup_session_at_step(sid_ph_gen, "phone_number")
+    resp = send(client, sid_ph_gen, "What are your services?").json()
+    assert resp["mode"] == "general"
+    assert chatbot._sessions[sid_ph_gen].current_step is None
+
+    # phone_number invalid input stays on step
+    sid_ph_inv = "ph-inv-1"
+    setup_session_at_step(sid_ph_inv, "phone_number")
+    resp = send(client, sid_ph_inv, "abc").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "phone_number"
+    assert "valid phone number" in resp["message"]
+
+    # -------------------------------------------------------------
+    # 6. Free-text: current_technology_stack
+    # -------------------------------------------------------------
+    sid_ts = "ts-test-1"
+    setup_session_at_step(sid_ts, "current_technology_stack")
+    resp = send(client, sid_ts, "Python React Node").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["completed"] is True
+
+    # tech_stack general question
+    sid_ts_gen = "ts-gen-1"
+    setup_session_at_step(sid_ts_gen, "current_technology_stack")
+    resp = send(client, sid_ts_gen, "What technologies do you use?").json()
+    assert resp["mode"] == "general"
+    assert chatbot._sessions[sid_ts_gen].current_step is None
+
+    # tech_stack invalid stays on step
+    sid_ts_inv = "ts-inv-1"
+    setup_session_at_step(sid_ts_inv, "current_technology_stack")
+    resp = send(client, sid_ts_inv, "1").json()
+    assert resp["mode"] == "enquiry"
+    assert resp["step"] == "current_technology_stack"
+    assert "current tools or technology stack" in resp["message"]
+
+
+
+
 
 

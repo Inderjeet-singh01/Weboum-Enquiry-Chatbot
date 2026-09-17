@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 import logging
 from collections.abc import AsyncGenerator
 import re
@@ -19,6 +20,10 @@ from app.schemas.chat import (
     ChatResponse,
     ConversationMode,
     ResponseType,
+    validate_company_name,
+    validate_full_name,
+    validate_phone_number,
+    validate_tech_stack,
     validate_work_email,
 )
 from app.services import rag
@@ -102,58 +107,49 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
         return response
 
 
-def is_general_question_intent(message: str, current_step: str | None = None) -> bool:
-    """Determine if a user message during enquiry is a general question / information request.
+class UserIntent(str, Enum):
+    NAVIGATION = "navigation"
+    GENERAL_QUESTION = "general_question"
+    ENQUIRY_ANSWER = "enquiry_answer"
+    UNCERTAIN = "uncertain"
 
-    Distinguishes:
-    A. Predefined navigation actions or valid enquiry answers -> False
-    B. General question / informational request -> True
-    C. Invalid answer to current enquiry field -> False (handled by existing validation)
+
+def is_semantic_general_query(message: str, current_step: str | None = None) -> bool:
+    """Analyze whether a message expresses general/informational query intent.
+    
+    Covers natural-language variations without brittle exact keyword matching:
+    - Questions with '?' or interrogative syntax (what, which, who, how, why, where, when)
+    - Inverted auxiliary verbs (can you, could you, does weboum, is there, are you, etc.)
+    - Imperative request phrasing (tell me, explain, describe, give me, show me, etc.)
+    - Prepositional topic inquiries (about the company, details on, everything about, etc.)
+    - Quantifier / catalog inquiries (all the teams, all projects delivered, etc.)
+    - Domain inquiries (who is the CEO, team leads, services, pricing, technologies, etc.)
+    
+    Protects free-text enquiry answers (e.g. company names like 'Weboum Technology' or
+    tech stack like 'Python React Node') from false positives.
     """
     if not message or not message.strip():
         return False
 
     msg = message.strip()
     lower_msg = msg.lower()
-
-    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, WEBSITE_GENERAL, ANYTHING_ELSE, ENQUIRE_NOW):
+    words = re.findall(r"[a-zA-Z']+", lower_msg)
+    if not words:
         return False
 
-    # Predefined options step: if message matches one of the options, it is an enquiry answer
-    if current_step and current_step in STEP_DEFINITIONS:
-        step_def = STEP_DEFINITIONS[current_step]
-        if step_def.get("type") == ResponseType.options:
-            if msg in step_def.get("options", []):
-                return False
-
-    # Email step: if message validates as work email, it is an enquiry answer
-    if current_step == "work_email":
-        try:
-            validate_work_email(msg)
-            return False
-        except ValueError:
-            pass
-
-    # Phone step: if message is phone digits (+, -, spaces, digits >= 7) without '?'
-    if current_step == "phone_number":
-        cleaned = re.sub(r"[\s\+\-\(\)\.]", "", msg)
-        if cleaned.isdigit() and len(cleaned) >= 7 and "?" not in msg:
-            return False
-
-    # 1. Question mark is a primary indicator
+    # 1. Direct punctuation indicator
     if "?" in msg:
         return True
 
-    # 2. Starts with standard English interrogative words
+    # 2. Interrogative pronoun/adverb starters
     question_starters = {
         "what", "what's", "whats", "which", "who", "who's", "whom", "whose",
         "why", "why's", "where", "where's", "when", "when's", "how", "how's",
     }
-    words = re.findall(r"[a-zA-Z']+", lower_msg)
-    if words and words[0] in question_starters:
+    if words[0] in question_starters:
         return True
 
-    # 3. Starts with auxiliary / modal verb question phrases
+    # 3. Inverted auxiliary question starters (modal / auxiliary verbs)
     aux_starters = {
         ("can", "you"), ("can", "i"), ("can", "we"),
         ("could", "you"), ("could", "i"), ("could", "we"),
@@ -161,48 +157,279 @@ def is_general_question_intent(message: str, current_step: str | None = None) ->
         ("do", "you"), ("does", "weboum"), ("does", "it"),
         ("is", "there"), ("is", "it"), ("is", "weboum"),
         ("are", "there"), ("are", "you"),
-        ("may", "i"), ("should", "i"),
+        ("should", "i"), ("may", "i"), ("shall", "we"),
+        ("have", "you"), ("has", "weboum"), ("did", "you"),
     }
     if len(words) >= 2 and (words[0], words[1]) in aux_starters:
         return True
 
-    # 4. Imperative / request starters
-    req_phrases = (
-        "tell me", "explain", "describe", "show me", "give me",
-        "i want to know", "i would like to know", "i'd like to know",
-        "i wanna know", "help me understand", "can you tell", "please tell",
+    # 4. Imperative & declarative request starters
+    req_prefixes = (
+        "tell me", "tell us", "give me", "give us", "show me", "show us",
+        "explain", "describe", "provide", "share", "clarify", "elaborate",
+        "i want to know", "i would like to know", "i'd like to know", "i need to know",
+        "i wanna know", "i was wondering", "let me know", "help me understand",
+        "can you tell", "please tell", "could you share", "walk me through",
     )
-    if any(lower_msg.startswith(p) for p in req_phrases):
+    if any(lower_msg.startswith(p) for p in req_prefixes):
         return True
 
-    # 5. Queries specifically mentioning Weboum or company services/pricing
-    if "weboum" in lower_msg:
+    # 5. Prepositional topic inquiries
+    prepositional_starters = (
+        "about ", "about the ", "details about ", "full details about ",
+        "more details about ", "details on ", "details of ",
+        "information about ", "information on ", "info about ", "info on ",
+        "more about ", "more on ", "everything about ", "all about ", "anything about ",
+        "company information",
+    )
+    if any(lower_msg.startswith(p) for p in prepositional_starters):
         return True
 
-    inquiry_keywords = {"services", "pricing", "cost", "portfolio", "offerings", "features", "products"}
-    if any(kw in words for kw in inquiry_keywords):
+    info_phrases = {
+        "company details", "company information", "company info",
+        "company overview", "company profile", "services overview",
+        "business overview", "team details", "team info",
+    }
+    if lower_msg in info_phrases:
         return True
+
+    # 6. Quantifier / catalog inquiries (e.g. 'all the teams', 'all projects delivered')
+    quantifier_starters = ("all the ", "all of ", "all of the ", "every ", "what all ")
+    if any(lower_msg.startswith(q) for q in quantifier_starters):
+        return True
+
+    if words[0] in ("all", "every", "list"):
+        domain_targets = {
+            "teams", "team", "leads", "lead", "projects", "services", "solutions",
+            "products", "clients", "offerings", "work", "deliverables", "delivered",
+            "technologies", "tech", "staff", "members", "people",
+        }
+        if any(w in domain_targets for w in words[1:]):
+            return True
+
+    # 7. Targeted inquiries about company personnel / leadership / management
+    leadership_terms = {
+        "ceo", "cto", "cfo", "coo", "founder", "founders",
+        "leadership", "leads", "leader", "leaders",
+        "management", "executives", "directors",
+    }
+    if any(term in words for term in leadership_terms):
+        company_assoc = {
+            "who", "tell", "details", "about", "is", "name", "the", "of",
+            "company", "weboum", "firm", "organization", "team", "your", "our", "runs", "head",
+        }
+        if len(words) == 1 or any(k in words for k in company_assoc):
+            return True
+
+    # 8. Standalone & contextual inquiry nouns regarding services / pricing / products / technologies
+    inquiry_nouns = {
+        "services", "pricing", "cost", "portfolio", "offerings", "features", "products", "projects", "technologies",
+    }
+    if any(noun in words for noun in inquiry_nouns):
+        if len(words) == 1:
+            return True
+        if any(term in words for term in ("weboum", "company", "firm", "organization", "your", "our", "all", "what", "tell", "list", "show", "of")):
+            return True
 
     return False
 
 
+def classify_user_intent(session: Session | None, message: str) -> UserIntent:
+    """Authoritative intent classifier shared across all endpoints and execution paths.
+
+    Strictly implements the field-aware routing model:
+    1. Navigation actions -> NAVIGATION
+    2. Initial mode:
+       - General semantic query -> GENERAL_QUESTION
+       - Else -> UNCERTAIN
+    3. General mode -> GENERAL_QUESTION
+    4. Enquiry mode:
+       - If completed -> ENQUIRY_ANSWER
+       - If option-based step:
+           - If message in predefined options -> ENQUIRY_ANSWER
+           - Else if semantic general query -> GENERAL_QUESTION
+           - Else -> UNCERTAIN (stays on current step with validation error)
+       - If work_email:
+           - Try validate_work_email(message):
+               - PASS -> ENQUIRY_ANSWER
+           - FAIL:
+               - If semantic general query -> GENERAL_QUESTION
+               - Else -> UNCERTAIN (stays on work_email with validation error)
+       - If phone_number:
+           - Try phone number validation:
+               - PASS (and not general query) -> ENQUIRY_ANSWER
+           - FAIL:
+               - If semantic general query -> GENERAL_QUESTION
+               - Else -> UNCERTAIN (stays on phone_number with validation error)
+       - If full_name:
+           - If semantic general query -> GENERAL_QUESTION
+           - Else try validate_full_name(message):
+               - PASS -> ENQUIRY_ANSWER
+               - FAIL -> UNCERTAIN (stays on full_name with validation error)
+       - If company_name:
+           - If semantic general query -> GENERAL_QUESTION
+           - Else:
+               - If message.lower() in ("company", "business"): UNCERTAIN
+               - Else try validate_company_name(message):
+                   - PASS -> ENQUIRY_ANSWER
+                   - FAIL -> UNCERTAIN (stays on company_name with validation error)
+       - If current_technology_stack:
+           - If semantic general query -> GENERAL_QUESTION
+           - Else try validate_tech_stack(message):
+               - PASS -> ENQUIRY_ANSWER
+               - FAIL -> UNCERTAIN (stays on current_technology_stack with validation error)
+    """
+    if not message or not message.strip():
+        return UserIntent.UNCERTAIN
+
+    msg = message.strip()
+
+    # 1. Deterministic navigation actions
+    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, WEBSITE_GENERAL, ANYTHING_ELSE, ENQUIRE_NOW):
+        return UserIntent.NAVIGATION
+
+    # 2. In initial mode
+    if session is None or session.mode == ConversationMode.initial.value:
+        if is_semantic_general_query(msg, current_step=None):
+            return UserIntent.GENERAL_QUESTION
+        return UserIntent.UNCERTAIN
+
+    # 3. In general mode
+    if session.mode == ConversationMode.general.value:
+        return UserIntent.GENERAL_QUESTION
+
+    # 4. In enquiry mode
+    if session.mode == ConversationMode.enquiry.value:
+        if session.completed:
+            return UserIntent.ENQUIRY_ANSWER
+
+        current_step = session.current_step
+
+        # Step Type A: Predefined options step match
+        if current_step and current_step in STEP_DEFINITIONS:
+            step_def = STEP_DEFINITIONS[current_step]
+            if step_def.get("type") == ResponseType.options:
+                if msg in step_def.get("options", []):
+                    return UserIntent.ENQUIRY_ANSWER
+                if is_semantic_general_query(msg, current_step=current_step):
+                    return UserIntent.GENERAL_QUESTION
+                return UserIntent.UNCERTAIN
+
+        # Step Type B: Work email step
+        if current_step == "work_email":
+            try:
+                validate_work_email(msg)
+                return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                if is_semantic_general_query(msg, current_step="work_email"):
+                    return UserIntent.GENERAL_QUESTION
+                return UserIntent.UNCERTAIN
+
+        # Step Type C: Phone number step
+        if current_step == "phone_number":
+            try:
+                validate_phone_number(msg)
+                if not is_semantic_general_query(msg, current_step="phone_number"):
+                    return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                pass
+            if is_semantic_general_query(msg, current_step="phone_number"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        # Step Type D: Full name step
+        if current_step == "full_name":
+            if is_semantic_general_query(msg, current_step="full_name"):
+                return UserIntent.GENERAL_QUESTION
+            try:
+                validate_full_name(msg)
+                return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                return UserIntent.UNCERTAIN
+
+        # Step Type E: Company name step
+        if current_step == "company_name":
+            if is_semantic_general_query(msg, current_step="company_name"):
+                return UserIntent.GENERAL_QUESTION
+            if msg.lower() in ("company", "business"):
+                return UserIntent.UNCERTAIN
+            try:
+                validate_company_name(msg)
+                return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                return UserIntent.UNCERTAIN
+
+        # Step Type F: Current technology stack step
+        if current_step == "current_technology_stack":
+            if is_semantic_general_query(msg, current_step="current_technology_stack"):
+                return UserIntent.GENERAL_QUESTION
+            try:
+                validate_tech_stack(msg)
+                return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                return UserIntent.UNCERTAIN
+
+        # Fallback if unknown step definition
+        if is_semantic_general_query(msg, current_step=current_step):
+            return UserIntent.GENERAL_QUESTION
+        return UserIntent.UNCERTAIN
+
+    return UserIntent.UNCERTAIN
+
+
+async def classify_intent_with_llm(message: str, current_step: str | None = None) -> UserIntent | None:
+    """Optional zero-shot LLM intent classification when Groq API key is present."""
+    if not settings.GROQ_API_KEY:
+        return None
+    step_question = (
+        STEP_DEFINITIONS.get(current_step, {}).get("question", current_step)
+        if current_step
+        else "general interaction"
+    )
+    prompt = (
+        "Classify the user message into either GENERAL_QUESTION or ENQUIRY_ANSWER.\n"
+        f"Context: The assistant asked: '{step_question}'\n"
+        f"User message: '{message}'\n"
+        "Return ONLY 'GENERAL_QUESTION' if the user is asking about Weboum, company details, services, team, portfolio, or technology.\n"
+        "Return ONLY 'ENQUIRY_ANSWER' if the user is providing their own details or answering the question.\n"
+        "Answer with strictly the label."
+    )
+    try:
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0.0,
+            ),
+            timeout=1.5,
+        )
+        text = completion.choices[0].message.content.strip().upper()
+        if "GENERAL" in text:
+            return UserIntent.GENERAL_QUESTION
+        if "ANSWER" in text:
+            return UserIntent.ENQUIRY_ANSWER
+    except Exception as e:
+        logger.debug("LLM intent classification skipped or timed out: %s", e)
+    return None
+
+
+def is_general_question_intent(message: str, current_step: str | None = None) -> bool:
+    """Backwards-compatible helper delegating to the authoritative semantic classifier."""
+    dummy_session = Session(mode=ConversationMode.enquiry.value, current_step=current_step)
+    return classify_user_intent(dummy_session, message) == UserIntent.GENERAL_QUESTION
+
+
 def is_general_question(session_id: str | None, message: str) -> bool:
-    """Return True if the message will trigger a Groq LLM completion."""
+    """Authoritative check used by API streaming router to decide whether to stream general LLM response."""
     if not session_id or not message or not message.strip():
         return False
     session = _sessions.get(session_id.strip())
     if session is None:
         return False
-    msg = message.strip()
-    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, ANYTHING_ELSE, ENQUIRE_NOW, WEBSITE_GENERAL):
-        return False
-    if session.mode == ConversationMode.general.value:
-        return True
-    if session.mode == ConversationMode.enquiry.value and not session.completed:
-        return is_general_question_intent(msg, session.current_step)
-    if session.mode == ConversationMode.initial.value:
-        return is_general_question_intent(msg)
-    return False
+    intent = classify_user_intent(session, message)
+    return intent == UserIntent.GENERAL_QUESTION
 
 
 async def stream_chat(
@@ -219,10 +446,13 @@ async def stream_chat(
     async with lock:
         session = _sessions.get(session_id)
         if session is None:
-            logger.info("New session created")
+            logger.info("New session created | session_id=%s", session_id)
             session = Session()
             _sessions[session_id] = session
-            logger.info("Chat routed | mode=%s", ConversationMode.initial.value)
+            logger.info(
+                "Routing decision (stream) | session_id=%s prev_mode=None intent=initial step=None new_mode=initial reset=False",
+                session_id,
+            )
             resp = _initial_response()
             yield {"type": "chunk", "content": resp.message}
             yield {
@@ -233,6 +463,17 @@ async def stream_chat(
                 "mode": resp.mode.value,
             }
             return
+
+        prev_mode = session.mode
+        current_step = session.current_step
+        intent = classify_user_intent(session, message)
+        logger.info(
+            "Routing decision (stream) | session_id=%s prev_mode=%s intent=%s step=%s",
+            session_id,
+            prev_mode,
+            intent.value,
+            current_step,
+        )
 
         if not is_general_question(session_id, message):
             resp = await _handle_locked(session_id, message)
@@ -249,9 +490,18 @@ async def stream_chat(
             return
 
         if session.mode == ConversationMode.enquiry.value:
+            logger.info(
+                "Enquiry interrupted by general question (stream) | session_id=%s step=%s -> resetting enquiry state",
+                session_id,
+                session.current_step,
+            )
             reset_enquiry_state(session)
         session.mode = ConversationMode.general.value
-        logger.info("Chat routed | mode=%s", session.mode)
+        logger.info(
+            "Routing state transition (stream) | session_id=%s new_mode=%s reset=True",
+            session_id,
+            session.mode,
+        )
         _require_message(message)
         logger.info("General question started")
         full_answer_parts: list[str] = []
@@ -410,13 +660,26 @@ async def _lock_for(session_id: str) -> asyncio.Lock:
 async def _handle_locked(session_id: str, message: str) -> ChatResponse:
     session = _sessions.get(session_id)
     if session is None:
-        logger.info("New session created")
+        logger.info("New session created | session_id=%s", session_id)
         session = Session()
         _sessions[session_id] = session
-        logger.info("Chat routed | mode=%s", ConversationMode.initial.value)
+        logger.info(
+            "Routing decision | session_id=%s prev_mode=None intent=initial step=None new_mode=initial reset=False",
+            session_id,
+        )
         return _initial_response()
 
-    logger.info("Chat routed | mode=%s", session.mode)
+    prev_mode = session.mode
+    current_step = session.current_step
+    intent = classify_user_intent(session, message)
+    logger.info(
+        "Routing decision | session_id=%s prev_mode=%s intent=%s step=%s",
+        session_id,
+        prev_mode,
+        intent.value,
+        current_step,
+    )
+
     if session.mode == ConversationMode.initial.value:
         return await _handle_initial(session, message)
 
@@ -467,7 +730,8 @@ async def _handle_initial(session: Session, message: str) -> ChatResponse:
             completed=False,
         )
 
-    if is_general_question_intent(message):
+    intent = classify_user_intent(session, message)
+    if intent == UserIntent.GENERAL_QUESTION:
         session.mode = ConversationMode.general.value
         return await _handle_general(session, message)
 
@@ -507,10 +771,28 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
             completed=False,
         )
 
-    # Check if message is a general question / information request
-    if is_general_question_intent(message, session.current_step):
+    # Check if message is a general question before enquiry validation
+    intent = classify_user_intent(session, message)
+    if intent == UserIntent.GENERAL_QUESTION:
+        logger.info(
+            "Enquiry interrupted by general question | session_id=%s step=%s -> resetting enquiry state",
+            session_id,
+            session.current_step,
+        )
         reset_enquiry_state(session)
         return await _answer_general_during_enquiry(session, message)
+
+    # Optional LLM disambiguation check on free-text steps when Groq is configured
+    if settings.GROQ_API_KEY and session.current_step in ("company_name", "current_technology_stack"):
+        llm_intent = await classify_intent_with_llm(message, session.current_step)
+        if llm_intent == UserIntent.GENERAL_QUESTION:
+            logger.info(
+                "Enquiry interrupted by general question (LLM classified) | session_id=%s step=%s -> resetting enquiry state",
+                session_id,
+                session.current_step,
+            )
+            reset_enquiry_state(session)
+            return await _answer_general_during_enquiry(session, message)
 
     already_complete = session.completed
     response = process_enquiry_answer(session, message)

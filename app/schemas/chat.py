@@ -64,6 +64,8 @@ def validate_company_name(value: str) -> str:
         raise ValueError("Please enter a valid company name (at least 2 characters).")
     if len(value) > 120:
         raise ValueError("Company name must not exceed 120 characters.")
+    if value.lower() in ("company", "business", "firm", "organization", "corp", "corporation"):
+        raise ValueError("Please enter your company or organization name (e.g. Acme Corp).")
     if not re.search(r"[a-zA-Z0-9À-ÿ]", value):
         raise ValueError("Please enter a valid company name.")
     if re.fullmatch(r"^\d+$", value):
@@ -82,6 +84,19 @@ def validate_tech_stack(value: str) -> str:
         raise ValueError("Please enter a valid technology stack.")
     if re.fullmatch(r"^\d+$", value):
         raise ValueError("Please enter your current tools or technology stack (e.g. WhatsApp, Salesforce, Excel).")
+    return value
+
+
+def validate_phone_number(value: str) -> str:
+    """Validate phone number: digits, plus, spaces, dashes, parentheses; at least 7 digits."""
+    value = value.strip()
+    if len(value) < 7:
+        raise ValueError("Please enter a valid phone number (at least 7 digits).")
+    if len(value) > 30:
+        raise ValueError("Phone number must not exceed 30 characters.")
+    cleaned = re.sub(r"[\s\+\-\(\)\.]", "", value)
+    if not cleaned.isdigit() or len(cleaned) < 7 or "?" in value:
+        raise ValueError("Please enter a valid phone number (e.g. +44 7700 900123 or +1 555-123-4567).")
     return value
 
 
@@ -141,6 +156,13 @@ class EnquiryData(BaseModel):
         if v is None:
             return None
         return validate_work_email(v)
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return validate_phone_number(v)
 
     @field_validator("full_name")
     @classmethod

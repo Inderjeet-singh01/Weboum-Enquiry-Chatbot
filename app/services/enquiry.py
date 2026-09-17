@@ -19,6 +19,7 @@ from app.schemas.chat import (
     ResponseType,
     validate_company_name,
     validate_full_name,
+    validate_phone_number,
     validate_tech_stack,
     validate_work_email,
 )
@@ -295,6 +296,8 @@ def _validate_answer(step_key: str, message: str) -> str | None:
     try:
         if step_key == "work_email":
             validate_work_email(message)
+        elif step_key == "phone_number":
+            validate_phone_number(message)
         elif step_key == "full_name":
             validate_full_name(message)
         elif step_key == "company_name":
