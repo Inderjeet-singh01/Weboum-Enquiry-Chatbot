@@ -30,7 +30,15 @@ async def chat(request: Request, payload: ChatRequest) -> Response:
     logger.info("Chat request received | streaming=%s", is_stream_client)
 
 
-    if is_stream_client and is_general_question(payload.session_id, payload.message):
+    payload_data = dict(payload.data) if payload.data else {}
+    if payload.action and "action" not in payload_data:
+        payload_data["action"] = payload.action
+    if payload.step and "step" not in payload_data:
+        payload_data["step"] = payload.step
+    if not payload_data:
+        payload_data = None
+
+    if is_stream_client and is_general_question(payload.session_id, payload.message, payload_data):
         async def event_generator():
             try:
                 async for event in stream_chat(payload.session_id, payload.message):
@@ -50,7 +58,7 @@ async def chat(request: Request, payload: ChatRequest) -> Response:
         )
 
     # Standard JSON response for enquiry mode, initial options, or non-streaming clients
-    response = await handle_chat(payload.session_id, payload.message)
+    response = await handle_chat(payload.session_id, payload.message, payload_data)
     return JSONResponse(content=response.model_dump())
 
 

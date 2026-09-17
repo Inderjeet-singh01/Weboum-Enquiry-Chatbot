@@ -34,7 +34,7 @@ async def test_stream_chat_general_question(mock_stream_llm):
 
     done_event = [e for e in events if e["type"] == "done"][0]
     assert done_event["mode"] == "general"
-    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry", "Hire a Developer"]
 
     session = chatbot._sessions[session_id]
     assert len(session.history) == 2
@@ -128,7 +128,7 @@ async def test_stream_chat_interruption_during_enquiry_resets_state_and_restarts
 
     done_event = [e for e in events if e["type"] == "done"][0]
     assert done_event["mode"] == "general"
-    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry"]
+    assert done_event["suggestions"] == ["Website / General Question", "Business Solutions Enquiry", "Hire a Developer"]
 
     # Verify enquiry state was invalidated
     session = chatbot._sessions[session_id]

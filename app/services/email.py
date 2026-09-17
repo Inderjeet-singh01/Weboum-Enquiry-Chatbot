@@ -112,3 +112,85 @@ def _require_config() -> None:
     if not settings.BREVO_SENDER_EMAIL.strip():
         logger.error("Enquiry email is not configured: missing BREVO_SENDER_EMAIL")
         raise EmailSendError("Enquiry email is not configured")
+
+
+async def send_hire_developer_email(data: dict[str, Any]) -> None:
+    """Send notification email for completed Hire a Developer requests via Brevo."""
+    _require_config()
+    name = (data.get("name") or "").strip()
+    subject = f"Hire a Developer Request - {name}" if name else "Hire a Developer Request"
+    payload = {
+        "sender": {
+            "name": settings.BREVO_SENDER_NAME,
+            "email": settings.BREVO_SENDER_EMAIL,
+        },
+        "to": [{"email": settings.ENQUIRY_EMAIL_TO}],
+        "subject": subject,
+        "htmlContent": build_hire_developer_email_html(data),
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": settings.BREVO_API_KEY,
+    }
+    logger.info("Brevo hire-developer email send started")
+    start_time = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(BREVO_SMTP_URL, json=payload, headers=headers)
+        if response.status_code >= 400:
+            logger.error("Brevo hire-developer email send failed | status=%s body=%s", response.status_code, response.text)
+            raise EmailSendError("Hire a Developer email could not be sent")
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("Brevo hire-developer email send completed | duration_ms=%.2f", duration_ms)
+    except EmailSendError:
+        raise
+    except Exception:
+        logger.exception("Brevo hire-developer email send failed")
+        raise EmailSendError("Hire a Developer email could not be sent") from None
+
+
+def build_hire_developer_email_html(data: dict[str, Any]) -> str:
+    """Format Hire a Developer submission details into responsive HTML table."""
+    skills = data.get("skills") or []
+    skills_str = ", ".join(skills) if isinstance(skills, list) else str(skills)
+
+    technology = data.get("technology") or []
+    tech_str = ", ".join(technology) if isinstance(technology, list) else str(technology)
+
+    work_time = data.get("work_time") or []
+    work_time_str = ", ".join(work_time) if isinstance(work_time, list) else str(work_time)
+
+    website_url = data.get("website_url")
+    url_str = str(website_url).strip() if website_url else "Not provided"
+
+    fields = [
+        ("Submission Type", "Hire a Developer Request"),
+        ("Skills", skills_str),
+        ("Technology", tech_str),
+        ("Work Time", work_time_str),
+        ("Timeframe", str(data.get("timeframe") or "")),
+        ("Start", str(data.get("start") or "")),
+        ("Name", str(data.get("name") or "")),
+        ("Email", str(data.get("email") or "")),
+        ("Phone", str(data.get("phone") or "")),
+        ("Website URL", url_str),
+        ("Comment", str(data.get("comment") or "")),
+    ]
+    rows = []
+    nl = chr(10)
+    for field_name, value in fields:
+        esc_field = html.escape(field_name)
+        esc_val = html.escape(value).replace(nl, "<br>")
+        rows.append(
+            f'<tr><td style="border:1px solid #d0d5dd;padding:8px 12px;font-weight:bold;width:30%;background:#f9fafb;">{esc_field}</td><td style="border:1px solid #d0d5dd;padding:8px 12px;">{esc_val}</td></tr>'
+        )
+    table_rows = nl.join(rows)
+    return (
+        "<!DOCTYPE html><html><body style='font-family:Arial,sans-serif;color:#101828;line-height:1.5;'>"
+        "<h2 style='margin-bottom:8px;color:#1d2939;'>Hire a Developer Request</h2>"
+        "<table style='border-collapse:collapse;width:100%;max-width:720px;'>"
+        "<thead><tr><th style='border:1px solid #d0d5dd;padding:8px 12px;text-align:left;background:#f2f4f7;'>Field</th>"
+        "<th style='border:1px solid #d0d5dd;padding:8px 12px;text-align:left;background:#f2f4f7;'>Value</th></tr></thead>"
+        f"<tbody>{table_rows}</tbody></table></body></html>"
+    )

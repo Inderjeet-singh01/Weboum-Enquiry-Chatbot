@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.services.hire_developer import empty_hire_developer_data
 from app.schemas.chat import (
     ChatResponse,
     ConversationMode,
@@ -150,6 +151,7 @@ class Session:
     mode: str = ConversationMode.initial.value
     current_step: str | None = None
     data: dict[str, str | None] = field(default_factory=empty_enquiry_data)
+    hire_dev_data: dict[str, Any] = field(default_factory=empty_hire_developer_data)
     completed: bool = False
     email_sent: bool = False
     history: list[dict[str, str]] = field(default_factory=list)

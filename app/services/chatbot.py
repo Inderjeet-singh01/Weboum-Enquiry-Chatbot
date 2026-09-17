@@ -25,6 +25,23 @@ from app.schemas.chat import (
     validate_phone_number,
     validate_tech_stack,
     validate_work_email,
+    validate_hire_dev_email,
+    validate_hire_dev_phone,
+    validate_hire_dev_comment,
+    validate_website_url,
+)
+from app.services.hire_developer import (
+    SKILLS_OPTIONS,
+    TECHNOLOGY_OPTIONS,
+    WORK_TIME_OPTIONS,
+    TIMEFRAME_OPTIONS,
+    START_OPTIONS,
+    STEP_CONFIG as HIRE_DEV_STEP_CONFIG,
+    empty_hire_developer_data,
+    process_hire_developer_step,
+    reset_hire_developer_state,
+    start_hire_developer,
+    completion_response as hire_dev_completion_response,
 )
 from app.services import rag
 from app.services.email import EMAIL_FAILURE_MESSAGE, EmailSendError, send_enquiry_email
@@ -44,13 +61,20 @@ logger = logging.getLogger(__name__)
 
 BUSINESS_ENQUIRY = "Business Enquiry"
 BUSINESS_SOLUTIONS_ENQUIRY = "Business Solutions Enquiry"
+HIRE_A_DEVELOPER = "Hire a Developer"
 WEBSITE_GENERAL = "Website / General Question"
 ANYTHING_ELSE = "Anything Else?"
 ENQUIRE_NOW = "Enquire Now"
 
+TOP_LEVEL_OPTIONS = [
+    WEBSITE_GENERAL,
+    BUSINESS_SOLUTIONS_ENQUIRY,
+    HIRE_A_DEVELOPER,
+]
+
 INITIAL_MESSAGE = "Hi! How can I help you today?"
-INITIAL_SUGGESTIONS = [WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY]
-GENERAL_FOLLOW_UP = [WEBSITE_GENERAL, BUSINESS_SOLUTIONS_ENQUIRY]
+INITIAL_SUGGESTIONS = list(TOP_LEVEL_OPTIONS)
+GENERAL_FOLLOW_UP = list(TOP_LEVEL_OPTIONS)
 
 GENERAL_INTRO_MESSAGE = "Sure! What would you like to know about us?"
 ANYTHING_ELSE_MESSAGE = "Sure! What else would you like to know?"
@@ -85,6 +109,7 @@ def get_all_sessions() -> dict[str, Any]:
             "mode": session.mode,
             "current_step": session.current_step,
             "data": dict(session.data) if session.data else {},
+            "hire_dev_data": dict(session.hire_dev_data) if hasattr(session, "hire_dev_data") and session.hire_dev_data else {},
             "completed": session.completed,
         }
     return {
@@ -94,7 +119,11 @@ def get_all_sessions() -> dict[str, Any]:
     }
 
 
-async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
+async def handle_chat(
+    session_id: str | None,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> ChatResponse:
     if not session_id or not session_id.strip():
         session_id = uuid.uuid4().hex
     else:
@@ -102,7 +131,7 @@ async def handle_chat(session_id: str | None, message: str) -> ChatResponse:
 
     lock = await _lock_for(session_id)
     async with lock:
-        response = await _handle_locked(session_id, message)
+        response = await _handle_locked(session_id, message, payload_data)
         response.session_id = session_id
         return response
 
@@ -234,7 +263,11 @@ def is_semantic_general_query(message: str, current_step: str | None = None) -> 
     return False
 
 
-def classify_user_intent(session: Session | None, message: str) -> UserIntent:
+def classify_user_intent(
+    session: Session | None,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> UserIntent:
     """Authoritative intent classifier shared across all endpoints and execution paths.
 
     Strictly implements the field-aware routing model:
@@ -279,13 +312,18 @@ def classify_user_intent(session: Session | None, message: str) -> UserIntent:
                - PASS -> ENQUIRY_ANSWER
                - FAIL -> UNCERTAIN (stays on current_technology_stack with validation error)
     """
-    if not message or not message.strip():
+    if not message and not payload_data:
         return UserIntent.UNCERTAIN
 
-    msg = message.strip()
+    msg = (message or "").strip()
+    action_val = str(payload_data.get("action")).lower() if payload_data and isinstance(payload_data, dict) and payload_data.get("action") else ""
 
     # 1. Deterministic navigation actions
-    if msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, WEBSITE_GENERAL, ANYTHING_ELSE, ENQUIRE_NOW):
+    if (
+        msg in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY, WEBSITE_GENERAL, ANYTHING_ELSE, ENQUIRE_NOW, HIRE_A_DEVELOPER)
+        or msg.lower() in ("anything else?", "anything else")
+        or action_val in ("anything_else", "anythingelse")
+    ):
         return UserIntent.NAVIGATION
 
     # 2. In initial mode
@@ -298,7 +336,94 @@ def classify_user_intent(session: Session | None, message: str) -> UserIntent:
     if session.mode == ConversationMode.general.value:
         return UserIntent.GENERAL_QUESTION
 
-    # 4. In enquiry mode
+    # 4. In hire_developer mode
+    if session.mode == ConversationMode.hire_developer.value:
+        if action_val in ("anything_else", "anythingelse") or msg.lower() in ("anything else?", "anything else"):
+            return UserIntent.NAVIGATION
+
+        if session.completed:
+            if is_semantic_general_query(msg, current_step=None):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if payload_data and isinstance(payload_data, dict):
+            action = payload_data.get("action")
+            if action in ("continue", "back", "submit"):
+                return UserIntent.ENQUIRY_ANSWER
+
+        current_step = session.current_step
+        if msg.lower() in ("back", "← back", "continue", "continue →", "submit", "submit request"):
+            return UserIntent.ENQUIRY_ANSWER
+
+        if current_step == "skills":
+            matched = False
+            for opt in SKILLS_OPTIONS:
+                if opt.lower() in msg.lower():
+                    matched = True
+                    break
+            if matched or (payload_data and ("skills" in payload_data or (isinstance(payload_data.get("data"), dict) and "skills" in payload_data["data"]))):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="skills"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if current_step == "technology":
+            matched = False
+            for opt in TECHNOLOGY_OPTIONS:
+                if opt.lower() in msg.lower():
+                    matched = True
+                    break
+            if matched or (payload_data and ("technology" in payload_data or (isinstance(payload_data.get("data"), dict) and "technology" in payload_data["data"]))):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="technology"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if current_step == "work_time":
+            if any(opt.lower() == msg.lower() for opt in WORK_TIME_OPTIONS) or (payload_data and ("work_time" in payload_data or (isinstance(payload_data.get("data"), dict) and "work_time" in payload_data["data"]))):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="work_time"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if current_step == "timeframe":
+            if any(opt.lower() == msg.lower() for opt in TIMEFRAME_OPTIONS) or (payload_data and ("timeframe" in payload_data or (isinstance(payload_data.get("data"), dict) and "timeframe" in payload_data["data"]))):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="timeframe"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if current_step == "start":
+            if any(opt.lower() == msg.lower() for opt in START_OPTIONS) or (payload_data and ("start" in payload_data or (isinstance(payload_data.get("data"), dict) and "start" in payload_data["data"]))):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="start"):
+                return UserIntent.GENERAL_QUESTION
+            return UserIntent.UNCERTAIN
+
+        if current_step == "contact_information":
+            if msg.lower() in ("back", "← back", "submit", "submit request"):
+                return UserIntent.ENQUIRY_ANSWER
+            if payload_data or msg.startswith("{") or any(k in msg.lower() for k in ("name:", "email:", "phone:", "comment:")):
+                return UserIntent.ENQUIRY_ANSWER
+            if is_semantic_general_query(msg, current_step="contact_information"):
+                return UserIntent.GENERAL_QUESTION
+            if "@" in msg and "." in msg.split("@")[-1]:
+                return UserIntent.ENQUIRY_ANSWER
+            cleaned_phone = re.sub(r"[\s\+\-\(\)\.]", "", msg)
+            if cleaned_phone.isdigit() and len(cleaned_phone) >= 7:
+                return UserIntent.ENQUIRY_ANSWER
+            try:
+                validate_full_name(msg)
+                return UserIntent.ENQUIRY_ANSWER
+            except ValueError:
+                pass
+            return UserIntent.UNCERTAIN
+
+        if is_semantic_general_query(msg, current_step=current_step):
+            return UserIntent.GENERAL_QUESTION
+        return UserIntent.UNCERTAIN
+
+    # 5. In enquiry mode
     if session.mode == ConversationMode.enquiry.value:
         if session.completed:
             return UserIntent.ENQUIRY_ANSWER
@@ -421,14 +546,23 @@ def is_general_question_intent(message: str, current_step: str | None = None) ->
     return classify_user_intent(dummy_session, message) == UserIntent.GENERAL_QUESTION
 
 
-def is_general_question(session_id: str | None, message: str) -> bool:
+def is_general_question(
+    session_id: str | None,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> bool:
     """Authoritative check used by API streaming router to decide whether to stream general LLM response."""
+    action_val = str(payload_data.get("action")).lower() if payload_data and isinstance(payload_data, dict) and payload_data.get("action") else ""
+    if action_val in ("continue", "back", "submit", "anything_else", "anythingelse"):
+        return False
+    if (message or "").strip().lower() in ("anything else?", "anything else"):
+        return False
     if not session_id or not message or not message.strip():
         return False
     session = _sessions.get(session_id.strip())
     if session is None:
         return False
-    intent = classify_user_intent(session, message)
+    intent = classify_user_intent(session, message, payload_data)
     return intent == UserIntent.GENERAL_QUESTION
 
 
@@ -496,6 +630,13 @@ async def stream_chat(
                 session.current_step,
             )
             reset_enquiry_state(session)
+        elif session.mode == ConversationMode.hire_developer.value:
+            logger.info(
+                "Hire Developer interrupted by general question (stream) | session_id=%s step=%s -> resetting hire_dev state",
+                session_id,
+                session.current_step,
+            )
+            reset_hire_developer_state(session)
         session.mode = ConversationMode.general.value
         logger.info(
             "Routing state transition (stream) | session_id=%s new_mode=%s reset=True",
@@ -657,7 +798,11 @@ async def _lock_for(session_id: str) -> asyncio.Lock:
         return _session_locks[session_id]
 
 
-async def _handle_locked(session_id: str, message: str) -> ChatResponse:
+async def _handle_locked(
+    session_id: str,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> ChatResponse:
     session = _sessions.get(session_id)
     if session is None:
         logger.info("New session created | session_id=%s", session_id)
@@ -671,7 +816,7 @@ async def _handle_locked(session_id: str, message: str) -> ChatResponse:
 
     prev_mode = session.mode
     current_step = session.current_step
-    intent = classify_user_intent(session, message)
+    intent = classify_user_intent(session, message, payload_data)
     logger.info(
         "Routing decision | session_id=%s prev_mode=%s intent=%s step=%s",
         session_id,
@@ -686,8 +831,11 @@ async def _handle_locked(session_id: str, message: str) -> ChatResponse:
     if session.mode == ConversationMode.enquiry.value:
         return await _handle_enquiry(session_id, session, message)
 
+    if session.mode == ConversationMode.hire_developer.value:
+        return await _handle_hire_developer(session_id, session, message, payload_data)
+
     if session.mode == ConversationMode.general.value:
-        return await _handle_general(session, message)
+        return await _handle_general(session, message, payload_data)
 
     session.mode = ConversationMode.initial.value
     session.current_step = None
@@ -715,9 +863,18 @@ def _initial_response() -> ChatResponse:
 
 async def _handle_initial(session: Session, message: str) -> ChatResponse:
     if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
         return start_enquiry(session)
 
+    if message == HIRE_A_DEVELOPER:
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
+        return start_hire_developer(session)
+
     if message == WEBSITE_GENERAL:
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
         session.mode = ConversationMode.general.value
         session.current_step = None
         session.completed = False
@@ -754,8 +911,15 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
             return _email_failure_response()
         return process_enquiry_answer(session, message)
 
+    # User explicitly clicks Hire a Developer during enquiry
+    if message == HIRE_A_DEVELOPER:
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
+        return start_hire_developer(session)
+
     # User explicitly clicks Business Solutions Enquiry (or Business Enquiry)
     if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
+        reset_enquiry_state(session)
         return start_enquiry(session)
 
     # User explicitly switches to General Question mode during active enquiry
@@ -809,9 +973,116 @@ async def _handle_enquiry(session_id: str, session: Session, message: str) -> Ch
     return response
 
 
+
+
+async def _handle_hire_developer(
+    session_id: str,
+    session: Session,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> ChatResponse:
+    _require_message(message, payload_data)
+
+    action_val = str(payload_data.get("action")).lower() if payload_data and isinstance(payload_data, dict) and payload_data.get("action") else ""
+    lower_msg = (message or "").strip().lower()
+
+    is_anything_else = (
+        action_val in ("anything_else", "anythingelse")
+        or lower_msg in ("anything else?", "anything else")
+        or message == ANYTHING_ELSE
+    )
+
+    if session.completed:
+        # 1. User selects "Anything else?" after successful submission -> switch to general mode
+        if is_anything_else:
+            reset_hire_developer_state(session)
+            session.mode = ConversationMode.general.value
+            session.current_step = None
+            session.completed = False
+            return ChatResponse(
+                message=GENERAL_INTRO_MESSAGE,
+                type=ResponseType.text,
+                suggestions=[],
+                mode=ConversationMode.general,
+                step=None,
+                completed=False,
+            )
+
+        # 2. User explicitly clicks Hire a Developer to start fresh from step 1
+        if message == HIRE_A_DEVELOPER:
+            reset_hire_developer_state(session)
+            return start_hire_developer(session)
+
+        # 3. User explicitly clicks Business Solutions Enquiry to switch
+        if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
+            reset_hire_developer_state(session)
+            return start_enquiry(session)
+
+        # 4. User explicitly switches to General Question mode
+        if message == WEBSITE_GENERAL:
+            reset_hire_developer_state(session)
+            session.mode = ConversationMode.general.value
+            session.current_step = None
+            session.completed = False
+            return ChatResponse(
+                message=GENERAL_INTRO_MESSAGE,
+                type=ResponseType.text,
+                suggestions=[],
+                mode=ConversationMode.general,
+                step=None,
+                completed=False,
+            )
+
+        # 5. User asks a general question or semantic query after completion
+        intent = classify_user_intent(session, message, payload_data)
+        if intent == UserIntent.GENERAL_QUESTION or is_semantic_general_query(message, current_step=None):
+            logger.info("General question received after Hire Developer completion | session_id=%s", session_id)
+            reset_hire_developer_state(session)
+            return await _answer_general_during_enquiry(session, message)
+
+        # 6. Idempotent response if anything else while completed
+        return hire_dev_completion_response()
+
+    # User explicitly clicks Hire a Developer to start fresh from step 1
+    if message == HIRE_A_DEVELOPER:
+        reset_hire_developer_state(session)
+        return start_hire_developer(session)
+
+    # User explicitly clicks Business Solutions Enquiry to switch
+    if message in (BUSINESS_SOLUTIONS_ENQUIRY, BUSINESS_ENQUIRY):
+        reset_hire_developer_state(session)
+        return start_enquiry(session)
+
+    # User explicitly switches to General Question mode during active hire developer
+    if message == WEBSITE_GENERAL:
+        reset_hire_developer_state(session)
+        session.mode = ConversationMode.general.value
+        return ChatResponse(
+            message=GENERAL_INTRO_MESSAGE,
+            type=ResponseType.text,
+            suggestions=[],
+            mode=ConversationMode.general,
+            step=None,
+            completed=False,
+        )
+
+    # Check if message is a general question before step processing
+    intent = classify_user_intent(session, message, payload_data)
+    if intent == UserIntent.GENERAL_QUESTION:
+        logger.info(
+            "Hire Developer interrupted by general question | session_id=%s step=%s -> resetting hire_developer state",
+            session_id,
+            session.current_step,
+        )
+        reset_hire_developer_state(session)
+        return await _answer_general_during_enquiry(session, message)
+
+    return await process_hire_developer_step(session, session_id, message, payload_data, TOP_LEVEL_OPTIONS)
+
 async def _answer_general_during_enquiry(session: Session, message: str) -> ChatResponse:
-    logger.info("General question received during enquiry | resetting enquiry state")
+    logger.info("General question received during active form | resetting form states")
     reset_enquiry_state(session)
+    reset_hire_developer_state(session)
     session.mode = ConversationMode.general.value
     try:
         context = await _build_rag_context(message, session.history)
@@ -866,15 +1137,39 @@ def _switch_to_general(session: Session) -> ChatResponse:
     )
 
 
-async def _handle_general(session: Session, message: str) -> ChatResponse:
-    _require_message(message)
+async def _handle_general(
+    session: Session,
+    message: str,
+    payload_data: dict[str, Any] | None = None,
+) -> ChatResponse:
+    _require_message(message, payload_data)
+
+    action_val = str(payload_data.get("action")).lower() if payload_data and isinstance(payload_data, dict) and payload_data.get("action") else ""
+    lower_msg = (message or "").strip().lower()
 
     if message in (BUSINESS_SOLUTIONS_ENQUIRY, ENQUIRE_NOW):
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
         return start_enquiry(session)
+
+    if message == HIRE_A_DEVELOPER:
+        reset_enquiry_state(session)
+        reset_hire_developer_state(session)
+        return start_hire_developer(session)
 
     if message == ANYTHING_ELSE:
         return ChatResponse(
             message=ANYTHING_ELSE_MESSAGE,
+            type=ResponseType.text,
+            suggestions=[],
+            mode=ConversationMode.general,
+            step=None,
+            completed=False,
+        )
+
+    if action_val in ("anything_else", "anythingelse") or lower_msg in ("anything else?", "anything else"):
+        return ChatResponse(
+            message=GENERAL_INTRO_MESSAGE,
             type=ResponseType.text,
             suggestions=[],
             mode=ConversationMode.general,
@@ -980,6 +1275,6 @@ async def _build_rag_context(
     return rag.format_context(chunks)
 
 
-def _require_message(message: str) -> None:
-    if not message:
+def _require_message(message: str, payload_data: dict[str, Any] | None = None) -> None:
+    if not message and not payload_data:
         raise HTTPException(status_code=400, detail=EMPTY_MESSAGE_DETAIL)

@@ -57,3 +57,14 @@ def mock_gemini_embedding(monkeypatch):
     return fake_embed_query
 
 
+
+
+@pytest.fixture
+def mock_stream_llm(monkeypatch):
+    async def fake_stream(question: str, context: str = "", *args, **kwargs):
+        chunks = ["Weboum ", "Technology ", "provides ", "AI and ", "cloud solutions."]
+        for c in chunks:
+            yield c
+
+    monkeypatch.setattr(chatbot, "stream_general_answer", fake_stream)
+    return fake_stream

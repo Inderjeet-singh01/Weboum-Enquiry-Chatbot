@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from enum import Enum
 import re
+from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
 
@@ -11,11 +13,14 @@ class ResponseType(str, Enum):
     text = "text"
     email = "email"
     phone = "phone"
+    multi_options = "multi_options"
+    contact_form = "contact_form"
 
 
 class ConversationMode(str, Enum):
     initial = "initial"
     enquiry = "enquiry"
+    hire_developer = "hire_developer"
     general = "general"
 
 
@@ -41,6 +46,13 @@ def validate_work_email(value: str) -> str:
     if len(tld) < 2 or not tld.isalpha():
         raise ValueError("Please enter a valid work email address.")
     return validated
+
+
+def validate_hire_dev_email(value: str | None) -> str | None:
+    """Accept hire-a-developer contact email without strict format validation."""
+    if value is None:
+        return None
+    return value.strip()
 
 
 def validate_full_name(value: str) -> str:
@@ -100,6 +112,30 @@ def validate_phone_number(value: str) -> str:
     return value
 
 
+def validate_hire_dev_phone(value: str | None) -> str | None:
+    """Accept hire-a-developer contact phone number without strict format validation."""
+    if value is None:
+        return None
+    return value.strip()
+
+
+def validate_hire_dev_comment(value: str) -> str:
+    """Validate hire-a-developer requirements comment."""
+    value = value.strip()
+    if not value:
+        raise ValueError("Comment is required.")
+    if len(value) > 2000:
+        raise ValueError("Comment must not exceed 2000 characters.")
+    return value
+
+
+def validate_website_url(value: str | None) -> str | None:
+    """Accept hire-a-developer website URL without strict format validation."""
+    if value is None:
+        return None
+    return value.strip()
+
+
 # ---------------------------------------------------------------------------
 # API Request / Response & Data Models
 # ---------------------------------------------------------------------------
@@ -107,6 +143,9 @@ def validate_phone_number(value: str) -> str:
 class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Session ID, auto-generated if omitted.")
     message: str = Field(default="", max_length=2000, description="Chat message input.")
+    action: str | None = Field(default=None, description="Action: continue, back, submit, etc.")
+    step: str | None = Field(default=None, description="Current step name for structured actions.")
+    data: dict[str, Any] | None = Field(default=None, description="Optional structured form or step data.")
 
     @field_validator("session_id")
     @classmethod
@@ -136,6 +175,8 @@ class ChatResponse(BaseModel):
     mode: ConversationMode
     step: str | None = None
     completed: bool = False
+    selected: list[str] | None = None
+    form_data: dict[str, Any] | None = None
 
 
 class EnquiryData(BaseModel):
@@ -184,6 +225,49 @@ class EnquiryData(BaseModel):
         if v is None:
             return None
         return validate_tech_stack(v)
+
+
+class HireDeveloperData(BaseModel):
+    """Pydantic model representing validated hire a developer data."""
+    skills: list[str] = Field(default_factory=list)
+    technology: list[str] = Field(default_factory=list)
+    work_time: list[str] = Field(default_factory=list)
+    timeframe: str | None = None
+    start: str | None = None
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    website_url: str | None = None
+    comment: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str | None) -> str | None:
+        return validate_hire_dev_email(v)
+
+    @field_validator("phone")
+    @classmethod
+    def check_phone(cls, v: str | None) -> str | None:
+        return validate_hire_dev_phone(v)
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return validate_full_name(v)
+
+    @field_validator("comment")
+    @classmethod
+    def check_comment(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return validate_hire_dev_comment(v)
+
+    @field_validator("website_url")
+    @classmethod
+    def check_url(cls, v: str | None) -> str | None:
+        return validate_website_url(v)
 
 
 class ErrorResponse(BaseModel):
