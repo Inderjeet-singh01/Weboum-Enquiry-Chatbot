@@ -42,7 +42,6 @@ ENQUIRY_FIELD_ORDER = [
 STEP_DEFINITIONS: dict[str, dict[str, Any]] = {
     "biggest_operational_challenge": {
         "question": "What is your biggest operational challenge right now?",
-        "supporting": "Where is your team spending the most unnecessary time or money?",
         "type": ResponseType.options,
         "options": [
             "High customer support call/chat volume & slow response time",
